@@ -323,13 +323,13 @@ def parse_one_pdf(pdf_path: str, save_debug_txt: bool = False, debug_dir: str = 
 
 def coalesce(df: pd.DataFrame, base: str) -> pd.DataFrame:
     """
-    Combine multiple variants of a field (base, base_cert, base_dev, base_x, base_y)
-    into a single column called `base`.
-    Keeps first non-null value and drops the duplicates.
+    Match the Colab behavior:
+    - Look for base, base_cert, base_dev, base_x, base_y.
+    - Create a single `base` column with the first non-null value.
+    - Drop the suffixed variants.
     """
-    candidates = [base, f"{base}_cert", f"{base}_dev", f"{base}_x", f"{base}_y"]
-    present = [c for c in candidates if c in df.columns]
-
+    cands = [base, f"{base}_cert", f"{base}_dev", f"{base}_x", f"{base}_y"]
+    present = [c for c in cands if c in df.columns]
     if not present:
         df[base] = ""
         return df
@@ -339,11 +339,9 @@ def coalesce(df: pd.DataFrame, base: str) -> pd.DataFrame:
         s = s.combine_first(df[c])
 
     df[base] = s
-
     for c in present:
         if c != base:
             df.drop(columns=c, inplace=True)
-
     return df
 
 
@@ -351,7 +349,8 @@ def parse_pdf_folder(pdf_dir: str):
     """
     Parse all PDFs in a directory and return:
         df_devices, df_certs, df_merged2
-    where df_merged2 is your 'with Start/End Dates' version.
+    df_merged2 matches the Colab 'with Start/End Dates' version and
+    contains a single 'Client Name' column (coalesced).
     """
     pdf_files = sorted(
         [p for p in glob.glob(os.path.join(pdf_dir, "*.pdf")) if os.path.isfile(p)],
@@ -364,42 +363,39 @@ def parse_pdf_folder(pdf_dir: str):
     for pdf in pdf_files:
         d, c = parse_one_pdf(pdf)
         base_index_offset = len(all_devices)
+        # adjust Device Index for cert rows
         for row in c:
             row["Device Index"] = base_index_offset + row["Device Index"]
         all_devices.extend(d)
         all_certs.extend(c)
 
-    # --- build device and cert tables ---
+    # ---------- build device & cert tables ----------
     df_devices = pd.DataFrame(
         all_devices,
         columns=LABELS_FLAT + ["Source PDF", "Client Name"]
     )
+
     cert_cols = ["Device Index","From Certificate ID","To Certificate ID",
                  "Number of Certificates","Offset Attributes","Period of Production",
                  "Issuer","Source PDF","Client Name"]
     df_certs = pd.DataFrame(all_certs, columns=cert_cols)
 
-    # Use device table only for technical fields + Device Source PDF.
-    # DO NOT carry Client Name here to avoid duplicate columns on merge.
-    df_devices_for_merge = df_devices[LABELS_FLAT + ["Source PDF"]] \
+    # keep Device Source PDF + Client Name for merge (like Colab)
+    df_devices_for_merge = df_devices[LABELS_FLAT + ["Source PDF","Client Name"]] \
                             .rename(columns={"Source PDF": "Device Source PDF"})
-    
+
+    # ---------- merge (this creates Client Name_cert / Client Name_dev) ----------
     df_merged = pd.merge(
-        df_certs,                 # has Client Name
-        df_devices_for_merge,     # no Client Name here
-        left_on="Device Index",
-        right_index=True,
-        how="left"
+        df_certs,
+        df_devices_for_merge,
+        left_on="Device Index", right_index=True, how="left",
+        suffixes=("_cert", "_dev")
     ).drop(columns=["Device Index"])
 
-
-    # ---- FIX: recover single 'Client Name' column ----
+    # ---------- COALESCE Client Name exactly like Colab ----------
     df_merged = coalesce(df_merged, "Client Name")
 
-    # (optional) also coalesce Source PDF if you ever need it unified:
-    # df_merged = coalesce(df_merged, "Source PDF")
-
-    # Split 'Period of Production' into Start/End
+    # ---------- Split Period of Production → Start/End ----------
     df_merged2 = df_merged.copy()
     df_merged2[["Start Date", "End Date"]] = df_merged2["Period of Production"].str.split(" - ", expand=True)
 
