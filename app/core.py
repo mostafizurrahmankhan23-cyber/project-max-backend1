@@ -321,48 +321,6 @@ def parse_one_pdf(pdf_path: str, save_debug_txt: bool = False, debug_dir: str = 
 
 # ---------- MULTI-PDF + MERGING ----------
 
-def parse_pdf_folder(pdf_dir: str):
-    """
-    Parse all PDFs in a directory and return:
-        df_devices, df_certs, df_merged2
-    where df_merged2 is your 'with Start/End Dates' version.
-    """
-    pdf_files = sorted(
-        [p for p in glob.glob(os.path.join(pdf_dir, "*.pdf")) if os.path.isfile(p)],
-        key=filename_sort_key
-    )
-    if not pdf_files:
-        raise FileNotFoundError(f"No PDFs found in: {pdf_dir}")
-
-    all_devices, all_certs = [], []
-    for pdf in pdf_files:
-        d, c = parse_one_pdf(pdf)
-        base_index_offset = len(all_devices)
-        for row in c:
-            row["Device Index"] = base_index_offset + row["Device Index"]
-        all_devices.extend(d)
-        all_certs.extend(c)
-
-    df_devices = pd.DataFrame(
-        all_devices,
-        columns=LABELS_FLAT + ["Source PDF", "Client Name"]
-    )
-    cert_cols = ["Device Index","From Certificate ID","To Certificate ID",
-                 "Number of Certificates","Offset Attributes","Period of Production",
-                 "Issuer","Source PDF","Client Name"]
-    df_certs = pd.DataFrame(all_certs, columns=cert_cols)
-
-    df_devices_for_merge = df_devices[LABELS_FLAT + ["Source PDF","Client Name"]] \
-                            .rename(columns={"Source PDF": "Device Source PDF"})
-
-    df_merged = pd.merge(
-        df_certs,
-        df_devices_for_merge,
-        left_on="Device Index", right_index=True, how="left",
-        suffixes=("_cert", "_dev")
-    ).drop(columns=["Device Index"])
-
-
 def coalesce(df: pd.DataFrame, base: str) -> pd.DataFrame:
     """
     Combine multiple variants of a field (base, base_cert, base_dev, base_x, base_y)
@@ -388,7 +346,54 @@ def coalesce(df: pd.DataFrame, base: str) -> pd.DataFrame:
 
     return df
 
+
+def parse_pdf_folder(pdf_dir: str):
+    """
+    Parse all PDFs in a directory and return:
+        df_devices, df_certs, df_merged2
+    where df_merged2 is your 'with Start/End Dates' version.
+    """
+    pdf_files = sorted(
+        [p for p in glob.glob(os.path.join(pdf_dir, "*.pdf")) if os.path.isfile(p)],
+        key=filename_sort_key
+    )
+    if not pdf_files:
+        raise FileNotFoundError(f"No PDFs found in: {pdf_dir}")
+
+    all_devices, all_certs = [], []
+    for pdf in pdf_files:
+        d, c = parse_one_pdf(pdf)
+        base_index_offset = len(all_devices)
+        for row in c:
+            row["Device Index"] = base_index_offset + row["Device Index"]
+        all_devices.extend(d)
+        all_certs.extend(c)
+
+    # --- build device and cert tables ---
+    df_devices = pd.DataFrame(
+        all_devices,
+        columns=LABELS_FLAT + ["Source PDF", "Client Name"]
+    )
+    cert_cols = ["Device Index","From Certificate ID","To Certificate ID",
+                 "Number of Certificates","Offset Attributes","Period of Production",
+                 "Issuer","Source PDF","Client Name"]
+    df_certs = pd.DataFrame(all_certs, columns=cert_cols)
+
+    df_devices_for_merge = df_devices[LABELS_FLAT + ["Source PDF","Client Name"]] \
+                            .rename(columns={"Source PDF": "Device Source PDF"})
+
+    df_merged = pd.merge(
+        df_certs,
+        df_devices_for_merge,
+        left_on="Device Index", right_index=True, how="left",
+        suffixes=("_cert", "_dev")
+    ).drop(columns=["Device Index"])
+
+    # ---- FIX: recover single 'Client Name' column ----
     df_merged = coalesce(df_merged, "Client Name")
+
+    # (optional) also coalesce Source PDF if you ever need it unified:
+    # df_merged = coalesce(df_merged, "Source PDF")
 
     # Split 'Period of Production' into Start/End
     df_merged2 = df_merged.copy()
