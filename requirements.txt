@@ -3,3 +3,4 @@ uvicorn[standard]
 pdfminer.six
 pandas
 numpy
+python-multipart
