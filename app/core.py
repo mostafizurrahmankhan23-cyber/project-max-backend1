@@ -362,20 +362,31 @@ def parse_pdf_folder(pdf_dir: str):
         suffixes=("_cert", "_dev")
     ).drop(columns=["Device Index"])
 
-    def coalesce(df, base):
-        cands = [base, f"{base}_cert", f"{base}_dev", f"{base}_x", f"{base}_y"]
-        present = [c for c in cands if c in df.columns]
-        if not present:
-            df[base] = ""
-            return df
-        s = pd.Series(pd.NA, index=df.index)
-        for c in present:
-            s = s.combine_first(df[c])
-        df[base] = s
-        for c in present:
-            if c != base and c in df.columns:
-                df.drop(columns=c, inplace=True)
+
+def coalesce(df: pd.DataFrame, base: str) -> pd.DataFrame:
+    """
+    Combine multiple variants of a field (base, base_cert, base_dev, base_x, base_y)
+    into a single column called `base`.
+    Keeps first non-null value and drops the duplicates.
+    """
+    candidates = [base, f"{base}_cert", f"{base}_dev", f"{base}_x", f"{base}_y"]
+    present = [c for c in candidates if c in df.columns]
+
+    if not present:
+        df[base] = ""
         return df
+
+    s = pd.Series(pd.NA, index=df.index)
+    for c in present:
+        s = s.combine_first(df[c])
+
+    df[base] = s
+
+    for c in present:
+        if c != base:
+            df.drop(columns=c, inplace=True)
+
+    return df
 
     df_merged = coalesce(df_merged, "Client Name")
 
