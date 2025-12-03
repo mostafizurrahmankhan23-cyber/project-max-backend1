@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+pdfminer.six
+pandas
+numpy
