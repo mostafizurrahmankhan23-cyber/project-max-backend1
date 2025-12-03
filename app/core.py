@@ -323,10 +323,9 @@ def parse_one_pdf(pdf_path: str, save_debug_txt: bool = False, debug_dir: str = 
 
 def coalesce(df: pd.DataFrame, base: str) -> pd.DataFrame:
     """
-    Match the Colab behavior:
-    - Look for base, base_cert, base_dev, base_x, base_y.
-    - Create a single `base` column with the first non-null value.
-    - Drop the suffixed variants.
+    Combine multiple variants of a field (base, base_cert, base_dev, base_x, base_y)
+    into a single column called `base`.
+    Keeps first non-null value and drops the duplicates.
     """
     cands = [base, f"{base}_cert", f"{base}_dev", f"{base}_x", f"{base}_y"]
     present = [c for c in cands if c in df.columns]
@@ -343,6 +342,7 @@ def coalesce(df: pd.DataFrame, base: str) -> pd.DataFrame:
         if c != base:
             df.drop(columns=c, inplace=True)
     return df
+
 
 
 def parse_pdf_folder(pdf_dir: str):
@@ -380,7 +380,6 @@ def parse_pdf_folder(pdf_dir: str):
                  "Issuer","Source PDF","Client Name"]
     df_certs = pd.DataFrame(all_certs, columns=cert_cols)
 
-    # keep Device Source PDF + Client Name for merge (like Colab)
     df_devices_for_merge = df_devices[LABELS_FLAT + ["Source PDF","Client Name"]] \
                             .rename(columns={"Source PDF": "Device Source PDF"})
 
@@ -410,12 +409,16 @@ def parse_pdf_folder(pdf_dir: str):
     return df_devices, df_certs, df_merged2
 
 
+
 def build_sales_dataframe(df_merged2: pd.DataFrame) -> pd.DataFrame:
     """
-    Approximate your df_sales/df_upload logic, but return a DataFrame instead
-    of uploading to Google Sheets.
+    Build the final df_sales/df_upload table from df_merged2.
+    Ensures 'Client Name' is preserved (coalesced if needed).
     """
     df_final = df_merged2.copy()
+
+    # EXTRA SAFETY: if Client Name somehow came in as _cert/_dev, fix it here too
+    df_final = coalesce(df_final, "Client Name")
 
     rename_map = {
         "Device": "Device Name",
@@ -426,6 +429,7 @@ def build_sales_dataframe(df_merged2: pd.DataFrame) -> pd.DataFrame:
     available = [k for k in rename_map.keys() if k in df_final.columns]
     df_sales = df_final.rename(columns={k: rename_map[k] for k in available})
 
+    # Only create empty columns if missing – do NOT overwrite existing ones
     for col in ["Device Name","Start Date","End Date","Number of Certificate","Client Name"]:
         if col not in df_sales.columns:
             df_sales[col] = ""
@@ -459,7 +463,6 @@ def build_sales_dataframe(df_merged2: pd.DataFrame) -> pd.DataFrame:
     df_sales["Date"] = df_sales["Source PDF"].apply(extract_date_from_filename)
     df_sales["Device ID"] = ""
 
-    # Final column order (no Sheet-specific gaps here; frontend can handle layout)
     ordered_cols = [
         "Sl", "Date", "Client Name", "Device ID", "Device Name",
         "Start Date", "End Date", "Number of Certificate", "Vintage", "Source PDF"
