@@ -379,15 +379,19 @@ def parse_pdf_folder(pdf_dir: str):
                  "Issuer","Source PDF","Client Name"]
     df_certs = pd.DataFrame(all_certs, columns=cert_cols)
 
-    df_devices_for_merge = df_devices[LABELS_FLAT + ["Source PDF","Client Name"]] \
+    # Use device table only for technical fields + Device Source PDF.
+    # DO NOT carry Client Name here to avoid duplicate columns on merge.
+    df_devices_for_merge = df_devices[LABELS_FLAT + ["Source PDF"]] \
                             .rename(columns={"Source PDF": "Device Source PDF"})
-
+    
     df_merged = pd.merge(
-        df_certs,
-        df_devices_for_merge,
-        left_on="Device Index", right_index=True, how="left",
-        suffixes=("_cert", "_dev")
+        df_certs,                 # has Client Name
+        df_devices_for_merge,     # no Client Name here
+        left_on="Device Index",
+        right_index=True,
+        how="left"
     ).drop(columns=["Device Index"])
+
 
     # ---- FIX: recover single 'Client Name' column ----
     df_merged = coalesce(df_merged, "Client Name")
