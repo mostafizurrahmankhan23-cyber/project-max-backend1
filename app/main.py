@@ -316,6 +316,48 @@ async def cost_redemption_json(
         "stats": stats,
     })
 
+@app.post("/m1/cost-redemption/xlsx")
+async def cost_redemption_xlsx(
+    device_status_file: UploadFile = File(..., description="Device Status Excel"),
+    redemption_file: UploadFile = File(..., description="Redemption Status Excel"),
+):
+    """
+    Return Redemption Status Excel with 'Cost of MWh' filled
+    using Device Status (Plant Owner's % × Selling Price).
+    """
+    try:
+        df_dev = pd.read_excel(device_status_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read device_status_file: {e}")
+
+    try:
+        df_red = pd.read_excel(redemption_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read redemption_file: {e}")
+
+    try:
+        df_out, stats = attach_redemption_cost(df_dev, df_red)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"CostRedemption error: {e}")
+
+    # Write to in-memory Excel
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_out.to_excel(writer, sheet_name="Redemption Status", index=False)
+        # optional debug sheet with stats
+        pd.DataFrame([stats]).to_excel(writer, sheet_name="Stats", index=False)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition":
+            'attachment; filename="redemption_with_cost_of_mwh.xlsx"'
+        },
+    )
+
+
 
 
 @app.post("/m1/transfer-status/xlsx")
