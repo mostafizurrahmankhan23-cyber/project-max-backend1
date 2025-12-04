@@ -40,6 +40,11 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+@app.get("/")
+def root():
+    # Used by Render's health check
+    return {"status": "ok", "service": "project-max-backend"}
+
 
 # ============================================================
 # 1) PDF → Redemption Status (your existing logic)
