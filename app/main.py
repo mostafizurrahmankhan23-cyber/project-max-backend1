@@ -18,7 +18,7 @@ from m1_pipeline.device_status import build_device_status
 from m1_pipeline.issuance_status import build_issuance_status
 from m1_pipeline.cost_redemption import attach_redemption_cost
 from m1_pipeline.transfer_vintage import attach_transfer_vintage
-
+from m1_pipeline.device_wise_sales import fill_device_wise_sales
 
 
 app = FastAPI(
@@ -342,4 +342,40 @@ async def transfer_status_vintage(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'},
+    )
+
+
+@app.post("/m1/device-wise-sales/xlsx")
+async def device_wise_sales_issued_xlsx(
+    issuance_file: UploadFile = File(..., description="Issuance Status Excel"),
+    device_file: UploadFile = File(..., description="Device Wise Sales Status Excel"),
+):
+    """
+    Upload Issuance Status + Device Wise Sales Status,
+    get back Device Wise Sales Status with 'Issued...' vintage columns filled.
+    """
+    try:
+        issuance_df = pd.read_excel(issuance_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read issuance_file: {e}")
+
+    try:
+        device_df = pd.read_excel(device_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read device_file: {e}")
+
+    try:
+        df_out = fill_device_wise_sales(device_df, issuance_df)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_out.to_excel(writer, sheet_name="Device Wise Sales Status", index=False)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="device_wise_sales_with_issued.xlsx"'},
     )
