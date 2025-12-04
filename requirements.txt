@@ -2,5 +2,7 @@ fastapi
 uvicorn[standard]
 pdfminer.six
 pandas
+openpyxl
 numpy
 python-multipart
+unidecode
