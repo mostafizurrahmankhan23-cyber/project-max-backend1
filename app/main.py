@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core import parse_one_pdf, LABELS_FLAT, build_sales_dataframe
 from m1_pipeline.device_id import attach_device_ids
+from m1_pipeline.device_status import build_device_status
 
 app = FastAPI(
     title="Project Max Certificates API",
@@ -191,3 +192,55 @@ async def process_device_id_xlsx(
             "Content-Disposition": 'attachment; filename="redemption_with_device_ids.xlsx"'
         },
     )
+
+
+
+
+@app.post("/m1/device-status/json")
+async def device_status_json(
+    devices_file: UploadFile = File(..., description="Device Registration Excel"),
+    vendor_file: UploadFile = File(..., description="Vendor Payment Excel"),
+):
+    try:
+        df_devices = pd.read_excel(devices_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read devices_file: {e}")
+
+    try:
+        df_vendor = pd.read_excel(vendor_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read vendor_file: {e}")
+
+    try:
+        out = build_device_status(df_devices, df_vendor, selling_price=4.5)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DeviceStatus error: {e}")
+
+    return JSONResponse({"rows": out.to_dict(orient="records")})
+
+
+@app.post("/m1/device-status/xlsx")
+async def device_status_xlsx(
+    devices_file: UploadFile = File(..., description="Device Registration Excel"),
+    vendor_file: UploadFile = File(..., description="Vendor Payment Excel"),
+):
+    try:
+        df_devices = pd.read_excel(devices_file.file)
+        df_vendor = pd.read_excel(vendor_file.file)
+        out = build_device_status(df_devices, df_vendor, selling_price=4.5)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DeviceStatus error: {e}")
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        out.to_excel(writer, sheet_name="DeviceStatus", index=False)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="device_status.xlsx"'},
+    )
+
