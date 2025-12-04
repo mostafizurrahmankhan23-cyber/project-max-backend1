@@ -17,6 +17,8 @@ from m1_pipeline.device_id import attach_device_ids
 from m1_pipeline.device_status import build_device_status
 from m1_pipeline.issuance_status import build_issuance_status
 from m1_pipeline.cost_redemption import attach_redemption_cost
+from m1_pipeline.transfer_vintage import attach_transfer_vintage
+
 
 
 app = FastAPI(
@@ -307,3 +309,37 @@ async def cost_redemption_json(
         "rows": df_out.to_dict(orient="records"),
         "stats": stats,
     })
+
+
+
+@app.post("/m1/transfer-status/xlsx")
+async def transfer_status_vintage(
+    file: UploadFile = File(..., description="Transfer Status Excel"),
+):
+    try:
+        df_transfer = pd.read_excel(file.file, sheet_name="Transfer Status")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read Excel: {e}")
+
+    # Adjust these names to your real headers in that sheet
+    df_out = attach_transfer_vintage(
+        df_transfer,
+        in_start_col="IN Period Starts",
+        in_end_col="IN Period Ends",
+        out_start_col="OUT Period Starts",
+        out_end_col="OUT Period Ends",
+        in_vintage_col="Vintage IN",
+        out_vintage_col="Vintage OUT",
+        add_flags=False,
+    )
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_out.to_excel(writer, sheet_name="Transfer Status", index=False)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'},
+    )
