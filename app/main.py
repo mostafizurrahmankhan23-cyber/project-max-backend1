@@ -19,6 +19,7 @@ from m1_pipeline.issuance_status import build_issuance_status
 from m1_pipeline.cost_redemption import attach_redemption_cost
 from m1_pipeline.transfer_vintage import attach_transfer_vintage
 from m1_pipeline.device_wise_sales import fill_device_wise_sales
+from m1_pipeline.cogs import compute_cogs
 
 
 app = FastAPI(
@@ -378,4 +379,44 @@ async def device_wise_sales_issued_xlsx(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="device_wise_sales_with_issued.xlsx"'},
+    )
+
+
+@app.post("/m1/cogs/xlsx")
+async def process_cogs_xlsx(
+    cogs_file: UploadFile = File(..., description="COGS Excel"),
+    sales_file: UploadFile = File(..., description="Device Wise Sales Status Excel"),
+):
+    """
+    Upload:
+      - COGS Excel
+      - Device Wise Sales Status Excel
+
+    Get back: COGS Excel with Registration Cost, Issued/Sold IREC,
+              Issuance Cost, Redemption Cost filled.
+    """
+    try:
+        cogs_df = pd.read_excel(cogs_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read cogs_file: {e}")
+
+    try:
+        sales_df = pd.read_excel(sales_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read sales_file: {e}")
+
+    try:
+        merged = compute_cogs(cogs_df, sales_df)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"COGS computation error: {e}")
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        merged.to_excel(writer, sheet_name="COGS", index=False)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="COGS_with_costs.xlsx"'},
     )
