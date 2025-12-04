@@ -15,6 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .core import parse_one_pdf, LABELS_FLAT, build_sales_dataframe
 from m1_pipeline.device_id import attach_device_ids
 from m1_pipeline.device_status import build_device_status
+from m1_pipeline.issuance_status import build_issuance_status
+from m1_pipeline.cost_redemption import attach_redemption_cost
+
 
 app = FastAPI(
     title="Project Max Certificates API",
@@ -244,3 +247,63 @@ async def device_status_xlsx(
         headers={"Content-Disposition": 'attachment; filename="device_status.xlsx"'},
     )
 
+
+
+@app.post("/m1/issuance-status/json")
+async def issuance_status_json(
+    issuance_file: UploadFile = File(..., description="Device Issuance Status Excel"),
+):
+    try:
+        df_src = pd.read_excel(issuance_file.file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read issuance_file: {e}")
+
+    try:
+        out = build_issuance_status(df_src)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"IssuanceStatus error: {e}")
+
+    return JSONResponse({"rows": out.to_dict(orient="records")})
+
+
+@app.post("/m1/issuance-status/xlsx")
+async def issuance_status_xlsx(
+    issuance_file: UploadFile = File(..., description="Device Issuance Status Excel"),
+):
+    try:
+        df_src = pd.read_excel(issuance_file.file)
+        out = build_issuance_status(df_src)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"IssuanceStatus error: {e}")
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        out.to_excel(writer, sheet_name="IssuanceStatus", index=False)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="issuance_status.xlsx"'},
+    )
+
+
+
+@app.post("/m1/cost-redemption/json")
+async def cost_redemption_json(
+    device_status_file: UploadFile = File(...),
+    redemption_file: UploadFile = File(...),
+):
+    try:
+        df_dev = pd.read_excel(device_status_file.file)
+        df_red = pd.read_excel(redemption_file.file)
+        df_out, stats = attach_redemption_cost(df_dev, df_red)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return JSONResponse({
+        "rows": df_out.to_dict(orient="records"),
+        "stats": stats,
+    })
