@@ -1,108 +1,235 @@
 # m1_pipeline/device_wise_sales.py
 
 from __future__ import annotations
+from typing import Dict, Tuple, Optional
 
 import re
-from typing import List, Tuple, Dict
-
 import pandas as pd
 from unidecode import unidecode
 
 
-def _normalize_text(x) -> str:
-    """Unidecode + strip; always return string."""
-    return unidecode(str(x).strip())
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
+
+def _norm(s: object) -> str:
+    """Normalize text for matching."""
+    return unidecode(str(s).strip())
 
 
-def build_device_vintage_lookup(issuance_df: pd.DataFrame) -> Dict[Tuple[str, str], float]:
+def _norm_vintage(s: object) -> str:
     """
-    From Issuance Status table, build:
-        (Device ID, Vintage) -> total MWh
+    Normalize vintage tokens like 'V24 Q3' or 'v24q3'
+    -> 'V24Q3'.
     """
-    for col in ["Device ID", "Vintage", "MWh"]:
-        if col not in issuance_df.columns:
-            raise KeyError(f"Issuance DataFrame missing required column '{col}'.")
+    s_norm = _norm(s).upper()
+    m = re.search(r"(V\d{2}\s*Q\d)", s_norm)
+    if not m:
+        return ""
+    return m.group(1).replace(" ", "")
 
-    df = issuance_df.copy()
 
-    # Clean keys
-    df["Device ID"] = df["Device ID"].apply(_normalize_text)
-    df["Vintage"]   = df["Vintage"].apply(_normalize_text)
+def _to_num(x: object) -> float:
+    """Safe numeric conversion; invalid -> 0.0."""
+    try:
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return 0.0
 
-    # Ensure numeric MWh
-    df["MWh"] = pd.to_numeric(df["MWh"], errors="coerce").fillna(0.0)
 
-    grouped_df = (
-        df.groupby(["Device ID", "Vintage"], as_index=False)["MWh"]
-          .sum()
-          .reset_index(drop=True)
-    )
+def _pick(colnames, *cands) -> str:
+    """
+    Pick a column name from a list of candidates (case-insensitive).
+    Raises KeyError if none found.
+    """
+    lc_map = {c.lower(): c for c in colnames}
+    for c in cands:
+        if c.lower() in lc_map:
+            return lc_map[c.lower()]
+    raise KeyError(f"Could not find any of {cands} in columns: {list(colnames)}")
 
-    lookup = {
-        (row["Device ID"], row["Vintage"]): float(row["MWh"])
-        for _, row in grouped_df.iterrows()
-    }
-    return lookup
 
+def _extract_vintage_from_header(header: str, keyword: str) -> Optional[str]:
+    """
+    From a column header like 'V24 Q3 Issued' or 'Issued V24Q3',
+    extract 'V24Q3'. Returns None if not found or if keyword is absent.
+    """
+    if keyword.lower() not in header.lower():
+        return None
+    m = re.search(r"(V\d{2}\s*Q\d)", header, flags=re.I)
+    if not m:
+        return None
+    return m.group(1).replace(" ", "").upper()
+
+
+# -------------------------------------------------------------------
+# Core function
+# -------------------------------------------------------------------
 
 def fill_device_wise_sales(
     device_df: pd.DataFrame,
     issuance_df: pd.DataFrame,
-    plant_id_col: str = "Plant ID",
-    issued_substring: str = "Issued",
+    redemption_df: pd.DataFrame | None = None,
+    transfer_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
-    Fill 'Issued' vintage columns in Device Wise Sales Status using Issuance Status totals.
+    Replicate full M-1_DeviceWiseSalesStatus_VQ logic in pure pandas.
+
+    1) Fills all '…Issued' columns in `device_df` using `issuance_df`
+       (Issuance Status):
+          Issued[VxxQy] = SUM MWh over Issuance
+                          grouped by (Device ID, Vintage).
+
+    2) If BOTH `redemption_df` and `transfer_df` are provided:
+       fills all '…Sold' columns in `device_df` as:
+          Sold[VxxQy] = SUM_Redemption(Number of Certificate)
+                        + SUM_Transfer_OUT(MWh)
+       grouped by (Plant ID = Device ID, Vintage).
 
     Parameters
     ----------
-    device_df : DataFrame
-        Device Wise Sales Status data (must have Plant ID + 'Issued...' columns).
-    issuance_df : DataFrame
-        Issuance Status data (must have Device ID, Vintage, MWh).
-    plant_id_col : str, default "Plant ID"
-        Column in device_df that corresponds to 'Device ID' in issuance_df.
-    issued_substring : str, default "Issued"
-        We treat any column whose name contains this substring as an 'Issued' column
-        and attempt to extract a vintage code from its name like 'V24Q1'.
+    device_df      : Device Wise Sales Status sheet
+    issuance_df    : Issuance Status sheet
+    redemption_df  : Redemption Status sheet (optional)
+    transfer_df    : Transfer Status sheet (optional)
 
     Returns
     -------
-    df_out : DataFrame
-        Copy of device_df with Issued columns filled with summed MWh.
+    pd.DataFrame with Issued/Sold vintage columns updated.
     """
-    if plant_id_col not in device_df.columns:
-        raise KeyError(f"Device DataFrame missing '{plant_id_col}' column.")
+    dev = device_df.copy()
 
-    df_dev = device_df.copy()
+    # ---------------------------------------------------------------
+    # Part A: "Issued" vintage columns (Issuance Status)
+    # ---------------------------------------------------------------
+    # Normalise Issuance columns
+    iss = issuance_df.copy()
 
-    # Normalize Plant ID
-    df_dev[plant_id_col] = df_dev[plant_id_col].apply(_normalize_text)
+    dev_id_col = _pick(iss.columns, "Device ID", "Plant ID")
+    vint_col   = _pick(iss.columns, "Vintage")
+    mwh_col    = _pick(iss.columns, "MWh")
 
-    # Build (Device ID, Vintage) -> MWh lookup from Issuance data
-    lookup = build_device_vintage_lookup(issuance_df)
+    iss["_dev"]     = iss[dev_id_col].map(_norm)
+    iss["_vintage"] = iss[vint_col].map(_norm_vintage)
+    iss["_mwh"]     = pd.to_numeric(iss[mwh_col], errors="coerce").fillna(0.0)
 
-    # Identify 'Issued' columns (same as: [col for col in device_df.columns if "Issued" in col])
-    issued_cols: List[str] = [col for col in df_dev.columns if issued_substring in col]
+    grp_iss = (
+        iss.groupby(["_dev", "_vintage"])["_mwh"]
+        .sum()
+        .reset_index()
+    )
+    issued_lookup: Dict[Tuple[str, str], float] = {
+        (row["_dev"], row["_vintage"]): float(row["_mwh"])
+        for _, row in grp_iss.iterrows()
+    }
 
-    # Fill Issued columns
-    for idx, row in df_dev.iterrows():
-        plant_id = row[plant_id_col]
+    # Normalise Plant ID in device sheet
+    plant_col = _pick(dev.columns, "Plant ID")
+    dev["_plant"] = dev[plant_col].map(_norm)
 
-        for col in issued_cols:
-            # Extract VxxQx from column name (ignore spaces)
-            match = re.search(r"(V\d{2}Q\d)", col.replace(" ", ""))
-            if not match:
-                # No vintage code in this column name: leave as-is
-                continue
+    # Identify Issued columns and fill them
+    issued_cols = [c for c in dev.columns if "issued" in c.lower()]
+    for col in issued_cols:
+        vint = _extract_vintage_from_header(col, "issued")
+        if not vint:
+            continue  # skip weird headers
 
-            vintage = match.group(1)  # e.g., "V24Q1"
-            key = (plant_id, vintage)
+        vals = []
+        for pid in dev["_plant"]:
+            v = issued_lookup.get((pid, vint), 0.0)
+            vals.append("" if abs(v) < 1e-12 else v)
+        dev[col] = vals
 
-            if key in lookup:
-                df_dev.at[idx, col] = lookup[key]
-            else:
-                # Keep blank if no matching issuance
-                df_dev.at[idx, col] = ""
+    # ---------------------------------------------------------------
+    # Part B: "Sold" vintage columns
+    #         (Redemption Status + Transfer Status OUT)
+    # ---------------------------------------------------------------
+    if redemption_df is not None and transfer_df is not None:
+        # ----- Redemption sums (Device ID, Vintage) -> Number of Certificate
+        red = redemption_df.copy()
+        red_dev_col = _pick(red.columns, "Device ID", "Plant ID")
+        red_vint_col = _pick(red.columns, "Vintage")
+        red_num_col = _pick(
+            red.columns,
+            "Number of Certificate",
+            "Number of Certificates",
+            "Number of Certficate",
+        )
 
-    return df_dev
+        red["_dev"]     = red[red_dev_col].map(_norm)
+        red["_vintage"] = red[red_vint_col].map(_norm_vintage)
+        red["_num"]     = red[red_num_col].map(_to_num)
+
+        grp_red = (
+            red.groupby(["_dev", "_vintage"])["_num"]
+            .sum()
+            .reset_index()
+        )
+        sum_red: Dict[Tuple[str, str], float] = {
+            (row["_dev"], row["_vintage"]): float(row["_num"])
+            for _, row in grp_red.iterrows()
+        }
+
+        # ----- Transfer OUT sums (Plant ID, Vintage) -> MWh OUT
+        tran = transfer_df.copy()
+
+        # In your original sheet the OUT table is the second set of columns,
+        # so after reading with pandas you will typically have something like
+        #   'Plant ID', 'Period Starts', 'Period Ends', 'Vintage', 'MWh',
+        #   'Plant ID.1', 'Period Starts.1', ...
+        # We always take the *last* matching set to approximate the OUT table.
+        tran_plant_cols = [c for c in tran.columns if "plant" in c.lower() and "id" in c.lower()]
+        tran_vint_cols  = [c for c in tran.columns if "vintage" in c.lower()]
+        tran_mwh_cols   = [c for c in tran.columns if "mwh" in c.lower()]
+
+        if not (tran_plant_cols and tran_vint_cols and tran_mwh_cols):
+            raise KeyError(
+                "Transfer Status sheet must contain Plant ID / Vintage / MWh "
+                "columns (OUT table)."
+            )
+
+        t_plant_col = tran_plant_cols[-1]   # OUT side
+        t_vint_col  = tran_vint_cols[-1]
+        t_mwh_col   = tran_mwh_cols[-1]
+
+        tran["_plant"]  = tran[t_plant_col].map(_norm)
+        tran["_vintage"] = tran[t_vint_col].map(_norm_vintage)
+        tran["_mwh"]    = tran[t_mwh_col].map(_to_num)
+
+        grp_out = (
+            tran.groupby(["_plant", "_vintage"])["_mwh"]
+            .sum()
+            .reset_index()
+        )
+        sum_out: Dict[Tuple[str, str], float] = {
+            (row["_plant"], row["_vintage"]): float(row["_mwh"])
+            for _, row in grp_out.iterrows()
+        }
+
+        # ----- Fill “…Sold” columns in device sheet
+        sold_cols = []
+        for j, name in enumerate(dev.columns):
+            if "sold" in name.lower():
+                m = re.search(r"(V\d{2}\s*Q\d)", name, flags=re.I)
+                if m:
+                    vint = m.group(1).replace(" ", "").upper()
+                    sold_cols.append((name, vint))
+
+        if not sold_cols:
+            # Nothing to do; keep Issued only
+            pass
+        else:
+            for col_name, vint in sold_cols:
+                vals = []
+                for pid in dev["_plant"]:
+                    total = 0.0
+                    total += sum_red.get((pid, vint), 0.0)
+                    total += sum_out.get((pid, vint), 0.0)
+                    vals.append("" if abs(total) < 1e-12 else total)
+                dev[col_name] = vals
+
+    # Remove helper column
+    if "_plant" in dev.columns:
+        dev.drop(columns=["_plant"], inplace=True)
+
+    return dev
