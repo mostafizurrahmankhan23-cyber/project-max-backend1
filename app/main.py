@@ -394,28 +394,26 @@ async def transfer_status_vintage(
 
 
 @app.post("/m1/device-wise-sales/xlsx")
-async def device_wise_sales_issued_xlsx(
+async def device_wise_sales_full_xlsx(
     issuance_file: UploadFile = File(..., description="Issuance Status Excel"),
-    device_file: UploadFile = File(..., description="Device Wise Sales Status Excel"),
+    device_file: UploadFile = File(...,   description="Device Wise Sales Status Excel"),
+    redemption_file: UploadFile = File(..., description="Redemption Status Excel"),
+    transfer_file: UploadFile = File(...,   description="Transfer Status Excel"),
 ):
-    """
-    Upload Issuance Status + Device Wise Sales Status,
-    get back Device Wise Sales Status with 'Issued...' vintage columns filled.
-    """
     try:
-        issuance_df = pd.read_excel(issuance_file.file)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read issuance_file: {e}")
+        issuance_df   = pd.read_excel(issuance_file.file)
+        device_df     = pd.read_excel(device_file.file)
+        redemption_df = pd.read_excel(redemption_file.file)
+        transfer_df   = pd.read_excel(transfer_file.file)
 
-    try:
-        device_df = pd.read_excel(device_file.file)
+        df_out = fill_device_wise_sales(
+            device_df,
+            issuance_df,
+            redemption_df=redemption_df,
+            transfer_df=transfer_df,
+        )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read device_file: {e}")
-
-    try:
-        df_out = fill_device_wise_sales(device_df, issuance_df)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -425,8 +423,11 @@ async def device_wise_sales_issued_xlsx(
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="device_wise_sales_with_issued.xlsx"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="device_wise_sales_with_issued_sold.xlsx"'
+        },
     )
+
 
 
 @app.post("/m1/cogs/xlsx")
