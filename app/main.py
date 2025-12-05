@@ -122,6 +122,103 @@ async def process_pdfs(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+# ============================================================
+# 1b) PDFs + I/S master → updated I/S.xlsx
+# ============================================================
+from openpyxl import load_workbook
+
+@app.post("/process-pdfs/is-xlsx")
+async def process_pdfs_is_xlsx(
+    files: List[UploadFile] = File(...),
+    is_file: UploadFile = File(...)
+):
+    """
+    Take certificate PDFs + an existing I/S workbook.
+    Fill the 'Redemption Status' sheet and return XLSX.
+    """
+    import tempfile, os
+    from io import BytesIO
+
+    # --- Save and parse PDFs (same logic as /process-pdfs)
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = []
+            for f in files:
+                path = os.path.join(tmpdir, f.filename)
+                with open(path, "wb") as out:
+                    out.write(await f.read())
+                paths.append(path)
+
+            all_devices, all_certs = [], []
+            for pdf in paths:
+                d, c = parse_one_pdf(pdf)
+                base_index = len(all_devices)
+                for row in c:
+                    row["Device Index"] = base_index + row["Device Index"]
+                all_devices.extend(d)
+                all_certs.extend(c)
+
+        df_devices = pd.DataFrame(all_devices, columns=LABELS_FLAT + ["Source PDF", "Client Name"])
+        cert_cols = [
+            "Device Index","From Certificate ID","To Certificate ID",
+            "Number of Certificates","Offset Attributes","Period of Production",
+            "Issuer","Source PDF","Client Name",
+        ]
+        df_certs = pd.DataFrame(all_certs, columns=cert_cols)
+
+        df_devices_for_merge = df_devices[LABELS_FLAT + ["Source PDF", "Client Name"]]
+        df_devices_for_merge = df_devices_for_merge.rename(columns={"Source PDF": "Device Source PDF"})
+
+        df_merged = pd.merge(
+            df_certs, df_devices_for_merge,
+            left_on="Device Index", right_index=True,
+            how="left"
+        ).drop(columns=["Device Index"])
+
+        df_merged2 = df_merged.copy()
+        df_merged2[["Start Date","End Date"]] = df_merged2["Period of Production"].str.split(" - ", expand=True)
+
+        df_sales = build_sales_dataframe(df_merged2)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF parsing failed: {e}")
+
+    # --- Load I/S workbook and overwrite Redemption Status sheet
+    try:
+        workbook_bytes = await is_file.read()
+        wb = load_workbook(BytesIO(workbook_bytes))
+
+        sheet_name = "Redemption Status"
+        if sheet_name not in wb.sheetnames:
+            raise HTTPException(status_code=400, detail="I/S workbook missing Redemption Status sheet")
+
+        ws = wb[sheet_name]
+
+        # Clear rows but keep headers
+        if ws.max_row > 1:
+            ws.delete_rows(2, ws.max_row - 1)
+
+        # Write results starting row 2
+        for r_idx, row in enumerate(df_sales.itertuples(index=False), start=2):
+            for c_idx, value in enumerate(row, start=1):
+                ws.cell(row=r_idx, column=c_idx, value=value)
+
+        out = BytesIO()
+        wb.save(out)
+        out.seek(0)
+
+        return StreamingResponse(
+            out,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="IS_with_redemption.xlsx"'}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update I/S workbook: {e}")
+
+
+
 # ============================================================
 # 2) M-1 DeviceID: attach Device IDs from Excel files
 # ============================================================
