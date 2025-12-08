@@ -12,6 +12,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+
 from .core import parse_one_pdf, LABELS_FLAT, build_sales_dataframe
 from m1_pipeline.device_id import attach_device_ids
 from m1_pipeline.device_status import build_device_status
@@ -44,6 +45,53 @@ def health():
 def root():
     # Used by Render's health check
     return {"status": "ok", "service": "project-max-backend"}
+
+
+# in app/main.py
+
+from fastapi import Form
+
+@app.post("/m1/issuance-from-is/xlsx")
+async def issuance_from_is_xlsx(
+    is_file: UploadFile = File(..., description="I/S master Excel"),
+    source_mode: str = Form("external"),  # "external" or "sheet"
+    # optional external file (used only if source_mode == "external")
+    issuance_file: UploadFile | None = File(None, description="Issuance Status Excel"),
+):
+    """
+    Build Issuance Status sheet from:
+      - either a separate Issuance file (external)
+      - or the 'Issuance Status' sheet inside the I/S Excel
+    """
+    import pandas as pd
+    from io import BytesIO
+    from m1_pipeline.issuance_status import build_issuance_status
+
+    # Read I/S Excel bytes once
+    is_bytes = await is_file.read()
+
+    if source_mode == "sheet":
+        # 👉 read sheet 'Issuance Status' from I/S workbook
+        df_src = pd.read_excel(BytesIO(is_bytes), sheet_name="Issuance Status")
+    else:
+        # 👉 use external Issuance file
+        if issuance_file is None:
+            raise HTTPException(status_code=400, detail="issuance_file is required in external mode")
+        df_src = pd.read_excel(issuance_file.file)
+
+    # your existing function
+    df_out = build_issuance_status(df_src)
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_out.to_excel(writer, sheet_name="Issuance Status", index=False)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="issuance_status.xlsx"'},
+    )
 
 
 # ============================================================
