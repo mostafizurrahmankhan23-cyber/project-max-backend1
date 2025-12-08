@@ -93,6 +93,25 @@ async def issuance_from_is_xlsx(
         headers={"Content-Disposition": 'attachment; filename="issuance_status.xlsx"'},
     )
 
+from fastapi import Body
+
+@app.post("/m1/device-id/export-json-xlsx")
+async def export_device_id_json_xlsx(payload: dict = Body(...)):
+    rows = payload.get("rows", [])
+    df = pd.DataFrame(rows)
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Redemption+DeviceID", index=False)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="redemption_with_device_ids_edited.xlsx"'
+        },
+    )
+
+
 
 # ============================================================
 # 1) PDF → Redemption Status (your existing logic)
