@@ -11,38 +11,38 @@ from unidecode import unidecode
 
 
 # -------------------------
-# Helper functions
+# Helpers
 # -------------------------
+
+def pick(colnames, *candidates) -> str:
+    """
+    Find the first column whose name matches any candidate (case-insensitive).
+    """
+    lower_map = {str(c).strip().lower(): c for c in colnames}
+    for cand in candidates:
+        key = str(cand).strip().lower()
+        if key in lower_map:
+            return lower_map[key]
+    raise KeyError(f"Missing columns. Need one of {candidates}. Found: {list(colnames)}")
+
 
 def normalize(name: str) -> str:
     """
-    Clean and normalize names for matching.
-
-    - ASCII fold (unidecode)
+    Normalize names for matching:
+    - ASCII fold
     - lowercase
-    - remove weird spaces/characters
-    - keep letters, digits, spaces, dashes
+    - keep letters/digits/spaces/dashes
     """
-    if not isinstance(name, str):
+    if name is None:
         return ""
-    name = unidecode(name).lower()
+    name = unidecode(str(name)).lower()
     name = name.replace("\u00a0", " ").replace("\u200b", "").replace("–", "-")
     name = re.sub(r"[^a-z0-9\s\-]", " ", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name
 
 
-def find_best_match(
-    name: str,
-    ref_list: List[str],
-    threshold: float = 0.85,
-) -> str | None:
-    """
-    Return closest fuzzy match to `name` in `ref_list` using difflib.
-    Compares on *normalized* names.
-    """
-    from difflib import get_close_matches
-
+def find_best_match(name: str, ref_list: List[str], threshold: float) -> str | None:
     name = normalize(name)
     if not name:
         return None
@@ -51,7 +51,7 @@ def find_best_match(
 
 
 # -------------------------
-# Core logic
+# Core
 # -------------------------
 
 def attach_device_ids(
@@ -60,106 +60,85 @@ def attach_device_ids(
     fuzzy_threshold: float = 0.67,
 ) -> tuple[pd.DataFrame, list[tuple[str, str]], pd.DataFrame]:
     """
-    Core M-1 Device ID logic.
+    Fill Sales/Redemption 'Device ID' by matching Sales 'Device Name'
+    to Registry 'Name' (or variants), then copying Registry 'Device ID'.
 
-    Parameters
-    ----------
-    df_sales : DataFrame
-        "Redemption Status" table, must contain at least:
-            - 'Device Name'
-        Optionally:
-            - 'Device ID'   (existing IDs; we won't override non-empty)
-            - 'Sl'          (for reporting)
-    df_devreg : DataFrame
-        "Device Registration" table, must contain:
-            - 'Name'
-            - 'Device ID'
-    fuzzy_threshold : float
-        Similarity cutoff for fuzzy matching (0..1). Lower -> more aggressive.
-
-    Returns
-    -------
-    df_out : DataFrame
-        Same rows as df_sales, with a *single* 'Device ID' column filled
-        using exact + fuzzy matching.
-    fuzzy_log : list[(sales_name, registry_name)]
-        Pairs of names that were matched via fuzzy matching.
-    unmatched : DataFrame
-        Subset of df_out rows where Device Name is non-blank but Device ID is
-        still empty. Columns: ['Sl','Device Name'] if 'Sl' exists, otherwise
-        just ['Device Name'].
+    Robust to header variations.
     """
 
-    # --- sanity checks ---
-    if "Device Name" not in df_sales.columns:
-        raise ValueError("df_sales must contain column 'Device Name'.")
+    sales = df_sales.copy()
+    reg = df_devreg.copy()
 
-    for col in ("Name", "Device ID"):
-        if col not in df_devreg.columns:
-            raise ValueError("df_devreg must contain columns 'Name' and 'Device ID'.")
-
-    # --- normalize names for exact key join ---
-    df_sales = df_sales.copy()
-    df_devreg = df_devreg.copy()
-
-    df_sales["clean_name"] = df_sales["Device Name"].apply(normalize)
-    df_devreg["clean_name"] = df_devreg["Name"].apply(normalize)
-
-    right = df_devreg[["clean_name", "Device ID"]].rename(
-        columns={"Device ID": "Device ID_reg"}
+    # --- robust column selection ---
+    sales_name_col = pick(
+        sales.columns,
+        "Device Name", "Device", "Plant Name", "Project Name", "Name"
     )
 
-    df_join = df_sales.merge(right, on="clean_name", how="left")
-
-    # existing 'Device ID' (if present) is kept unless registry has a match
-    if "Device ID" in df_join.columns:
-        df_join["Device ID_final"] = df_join["Device ID_reg"].combine_first(
-            df_join["Device ID"]
-        )
+    # Ensure sales has an ID column (create if missing)
+    if any(str(c).strip().lower() in {"device id", "plant id"} for c in sales.columns):
+        sales_id_col = pick(sales.columns, "Device ID", "Plant ID")
     else:
-        df_join["Device ID_final"] = df_join["Device ID_reg"]
+        sales_id_col = "Device ID"
+        sales[sales_id_col] = ""
 
-    # --- fuzzy matching for remaining blanks ---
-    devreg_dict = dict(zip(df_devreg["clean_name"], df_devreg["Device ID"]))
-    registry_keys = list(devreg_dict.keys())
-
-    mask_missing = (
-        df_join["Device ID_final"].isna()
-        | (df_join["Device ID_final"].astype(str).str.strip() == "")
+    reg_name_col = pick(
+        reg.columns,
+        "Name", "Device Name", "Plant Name", "Project Name"
     )
+    reg_id_col = pick(reg.columns, "Device ID", "Plant ID")
 
+    # --- normalize keys ---
+    sales["__clean_name__"] = sales[sales_name_col].apply(normalize)
+    reg["__clean_name__"] = reg[reg_name_col].apply(normalize)
+
+    # --- exact join ---
+    right = reg[["__clean_name__", reg_id_col]].rename(columns={reg_id_col: "__id_reg__"})
+    joined = sales.merge(right, on="__clean_name__", how="left")
+
+    # Fill only where sales id is empty
+    sales_id_series = joined[sales_id_col].astype(str).str.strip()
+    reg_id_series = joined["__id_reg__"].astype(str).str.strip()
+
+    needs_fill = sales_id_series.eq("") | sales_id_series.isna()
+    has_reg = reg_id_series.ne("") & reg_id_series.notna()
+
+    joined.loc[needs_fill & has_reg, sales_id_col] = joined.loc[needs_fill & has_reg, "__id_reg__"]
+
+    # --- fuzzy for remaining blanks ---
+    reg_dict = dict(zip(reg["__clean_name__"], reg[reg_id_col]))
+    reg_keys = list(reg_dict.keys())
+
+    still_blank = joined[sales_id_col].astype(str).str.strip().eq("")
     fuzzy_log: list[Tuple[str, str]] = []
 
-    for idx in df_join[mask_missing].index:
-        cname = df_join.at[idx, "clean_name"]
-        best = find_best_match(cname, registry_keys, threshold=fuzzy_threshold)
+    for idx in joined[still_blank].index:
+        cname = joined.at[idx, "__clean_name__"]
+        best = find_best_match(cname, reg_keys, threshold=fuzzy_threshold)
         if best:
-            df_join.at[idx, "Device ID_final"] = devreg_dict.get(best, "")
-            sales_name = df_join.at[idx, "Device Name"]
-            reg_name = df_devreg.loc[df_devreg["clean_name"] == best, "Name"].iloc[0]
-            fuzzy_log.append((sales_name, reg_name))
+            joined.at[idx, sales_id_col] = reg_dict.get(best, "")
+            sales_name = joined.at[idx, sales_name_col]
+            reg_name = reg.loc[reg["__clean_name__"] == best, reg_name_col].iloc[0]
+            fuzzy_log.append((str(sales_name), str(reg_name)))
 
-    # --- final clean 'Device ID' column ---
-    df_out = df_join.copy()
-    df_out["Device ID"] = df_out["Device ID_final"].fillna("").astype(str)
+    # --- output: normalize column names back to expected ---
+    df_out = joined.drop(columns=["__clean_name__", "__id_reg__"], errors="ignore")
 
-    # drop helper columns
-    df_out.drop(
-        columns=["clean_name", "Device ID_reg", "Device ID_final"],
-        inplace=True,
-        errors="ignore",
-    )
+    # Standardize to 'Device Name' and 'Device ID' for downstream steps
+    if sales_name_col != "Device Name":
+        df_out.rename(columns={sales_name_col: "Device Name"}, inplace=True)
+
+    if sales_id_col != "Device ID":
+        df_out.rename(columns={sales_id_col: "Device ID"}, inplace=True)
 
     # --- unmatched report ---
-    device_id_series = df_out["Device ID"].astype(str)
-    no_id = device_id_series.str.strip().eq("")
-    nonblank_name = df_out["Device Name"].astype(str).str.strip() != ""
-    mask_unmatched = no_id & nonblank_name
+    nonblank_name = df_out["Device Name"].astype(str).str.strip().ne("")
+    no_id = df_out["Device ID"].astype(str).str.strip().eq("")
+    mask_unmatched = nonblank_name & no_id
 
+    cols = ["Device Name"]
     if "Sl" in df_out.columns:
         cols = ["Sl", "Device Name"]
-    else:
-        cols = ["Device Name"]
 
     unmatched = df_out.loc[mask_unmatched, cols].copy()
 
