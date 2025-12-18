@@ -310,8 +310,11 @@ async def process_device_id_json(
 
     try:
         df_out, fuzzy_log, unmatched = attach_device_ids(df_sales, df_devreg)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Matching error: {e}")
+
 
     return JSONResponse(
         {
