@@ -101,14 +101,20 @@ def attach_device_ids(
     right = reg[["__clean_name__", reg_id_col]].rename(columns={reg_id_col: "__id_reg__"})
     joined = sales.merge(right, on="__clean_name__", how="left")
 
-    # Fill only where sales id is empty
-    sales_id_series = joined[sales_id_col].astype(str).str.strip()
-    reg_id_series = joined["__id_reg__"].astype(str).str.strip()
+    # --- force safe dtypes (avoid pandas dtype crash) ---
+    joined[sales_id_col] = joined[sales_id_col].astype("object")
+    joined["__id_reg__"] = joined["__id_reg__"].astype("object")
+    
+    # normalize blanks
+    sales_id_series = joined[sales_id_col].fillna("").astype(str).str.strip()
+    reg_id_series   = joined["__id_reg__"].fillna("").astype(str).str.strip()
+    
+    needs_fill = sales_id_series.eq("")  # empty only
+    has_reg    = reg_id_series.ne("")    # non-empty only
+    
+    # assign as string
+    joined.loc[needs_fill & has_reg, sales_id_col] = reg_id_series[needs_fill & has_reg]
 
-    needs_fill = sales_id_series.eq("") | sales_id_series.isna()
-    has_reg = reg_id_series.ne("") & reg_id_series.notna()
-
-    joined.loc[needs_fill & has_reg, sales_id_col] = joined.loc[needs_fill & has_reg, "__id_reg__"]
 
     # --- fuzzy for remaining blanks ---
     reg_dict = dict(zip(reg["__clean_name__"], reg[reg_id_col]))
