@@ -76,17 +76,22 @@ def attach_device_ids(
     )
 
     # Ensure sales has an ID column (create if missing)
+    # Ensure sales has an ID column (create if missing)
     if any(str(c).strip().lower() in {"device id", "plant id"} for c in sales.columns):
         sales_id_col = pick(sales.columns, "Device ID", "Plant ID")
     else:
         sales_id_col = "Device ID"
-        sales[sales_id_col] = ""
+        sales[sales_id_col] = pd.NA
+    
+    # 🔥 IMPORTANT: force to string dtype so we can write IDs like "275KES10000"
+    sales[sales_id_col] = sales[sales_id_col].astype("string").fillna("")
 
     reg_name_col = pick(
         reg.columns,
         "Name", "Device Name", "Plant Name", "Project Name"
     )
     reg_id_col = pick(reg.columns, "Device ID", "Plant ID")
+    reg[reg_id_col] = reg[reg_id_col].astype("string").fillna("")
 
     # --- normalize keys ---
     sales["__clean_name__"] = sales[sales_name_col].apply(normalize)
