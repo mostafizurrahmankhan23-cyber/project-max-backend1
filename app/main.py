@@ -315,14 +315,22 @@ async def process_device_id_json(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Matching error: {e}")
 
-
+    def df_to_json_safe(df: pd.DataFrame) -> list[dict]:
+        df = df.copy()
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].dt.strftime("%Y-%m-%d")
+        return df.to_dict(orient="records")
+    
+    
     return JSONResponse(
         {
-            "rows": df_out.to_dict(orient="records"),
+            "rows": df_to_json_safe(df_out),
             "fuzzy_log": fuzzy_log,
-            "unmatched": unmatched.to_dict(orient="records"),
+            "unmatched": df_to_json_safe(unmatched),
         }
     )
+
 
 
 @app.post("/m1/device-id/xlsx")
