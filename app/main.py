@@ -601,18 +601,44 @@ import traceback
 from fastapi import UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 
+def read_transfer_sheet_autheader(xlsx_bytes: bytes) -> pd.DataFrame:
+    # preview without headers
+    preview = pd.read_excel(
+        BytesIO(xlsx_bytes),
+        sheet_name="Transfer Status",
+        header=None,
+        nrows=20,
+        engine="openpyxl",
+    )
+
+    header_row = None
+    for i in range(len(preview)):
+        row_vals = preview.iloc[i].astype(str).str.replace("\u00A0", " ").str.strip().str.lower().tolist()
+        if "period starts" in row_vals:
+            header_row = i
+            break
+
+    if header_row is None:
+        raise ValueError(
+            "Could not locate header row containing 'Period Starts'. "
+            f"Preview rows: {preview.head(10).values.tolist()}"
+        )
+
+    # read full sheet using detected header row
+    df = pd.read_excel(
+        BytesIO(xlsx_bytes),
+        sheet_name="Transfer Status",
+        header=header_row,
+        engine="openpyxl",
+    )
+    return df
+
+
 @app.post("/m1/transfer-status/xlsx")
 async def transfer_status_vintage(file: UploadFile = File(...)):
     try:
         b = await file.read()
-
-        # ✅ header row 3 (0-index => 2)
-        df_transfer = pd.read_excel(
-            BytesIO(b),
-            sheet_name="Transfer Status",
-            header=2,
-            engine="openpyxl",
-        )
+        df_transfer = read_transfer_sheet_autheader(b)
 
         df_out = attach_transfer_vintage(df_transfer, add_flags=False)
 
