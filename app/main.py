@@ -595,28 +595,42 @@ async def cost_redemption_xlsx(
 
 
 
+from io import BytesIO
+import pandas as pd
+import traceback
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
+
 @app.post("/m1/transfer-status/xlsx")
-async def transfer_status_vintage(
-    file: UploadFile = File(..., description="Transfer Status Excel"),
-):
+async def transfer_status_vintage(file: UploadFile = File(...)):
     try:
-        # ✅ header is on row 3 because row 2 is the IN/OUT banner
-        df_transfer = pd.read_excel(file.file, sheet_name="Transfer Status", header=2)
+        b = await file.read()
+
+        # ✅ header row 3 (0-index => 2)
+        df_transfer = pd.read_excel(
+            BytesIO(b),
+            sheet_name="Transfer Status",
+            header=2,
+            engine="openpyxl",
+        )
+
+        df_out = attach_transfer_vintage(df_transfer, add_flags=False)
+
+        out_buf = BytesIO()
+        with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
+            df_out.to_excel(writer, sheet_name="Transfer Status", index=False)
+        out_buf.seek(0)
+
+        return StreamingResponse(
+            out_buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'},
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read Excel: {e}")
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{tb}")
 
-    df_out = attach_transfer_vintage(df_transfer, add_flags=False)
-
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df_out.to_excel(writer, sheet_name="Transfer Status", index=False)
-    buffer.seek(0)
-
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'},
-    )
 
 
 
