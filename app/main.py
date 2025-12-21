@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core import parse_one_pdf, LABELS_FLAT, build_sales_dataframe
 from m1_pipeline.device_id import attach_device_ids
-from m1_pipeline.device_status import build_device_status
+from m1_pipeline.device_status import build_device_status, build_device_status_from_existing_status
 from m1_pipeline.issuance_status import build_issuance_status
 from m1_pipeline.cost_redemption import attach_redemption_cost
 from m1_pipeline.transfer_vintage import attach_transfer_vintage
