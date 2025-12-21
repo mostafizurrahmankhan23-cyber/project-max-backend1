@@ -604,15 +604,9 @@ async def transfer_status_vintage(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read Excel: {e}")
 
-    # Adjust these names to your real headers in that sheet
+    # ✅ NEW: uses your duplicate-header logic
     df_out = attach_transfer_vintage(
         df_transfer,
-        in_start_col="IN Period Starts",
-        in_end_col="IN Period Ends",
-        out_start_col="OUT Period Starts",
-        out_end_col="OUT Period Ends",
-        in_vintage_col="Vintage IN",
-        out_vintage_col="Vintage OUT",
         add_flags=False,
     )
 
@@ -624,8 +618,11 @@ async def transfer_status_vintage(
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'
+        },
     )
+
 
 
 @app.post("/m1/device-wise-sales/xlsx")
