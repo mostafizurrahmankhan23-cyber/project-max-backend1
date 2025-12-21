@@ -382,27 +382,21 @@ async def process_device_id_xlsx(
 
 
 
+from fastapi import UploadFile, File
+from fastapi.responses import JSONResponse
+import pandas as pd
+
 @app.post("/m1/device-status/json")
 async def device_status_json(
-    devices_file: UploadFile = File(..., description="Device Registration Excel"),
-    vendor_file: UploadFile = File(..., description="Vendor Payment Excel"),
+    devices_file: UploadFile = File(...),
+    status_file: UploadFile = File(...),
 ):
-    try:
-        df_devices = pd.read_excel(devices_file.file)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read devices_file: {e}")
+    df_devices = pd.read_excel(devices_file.file)
+    df_status  = pd.read_excel(status_file.file)
 
-    try:
-        df_vendor = pd.read_excel(vendor_file.file)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read vendor_file: {e}")
-
-    try:
-        out = build_device_status(df_devices, df_vendor, selling_price=4.5)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DeviceStatus error: {e}")
-
+    out = build_device_status_from_existing_status(df_devices, df_status, selling_price=4.5)
     return JSONResponse({"rows": out.to_dict(orient="records")})
+
 
 
 @app.post("/m1/device-status/xlsx")
