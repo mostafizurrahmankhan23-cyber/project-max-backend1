@@ -595,68 +595,74 @@ async def cost_redemption_xlsx(
 
 
 
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
 from io import BytesIO
 import pandas as pd
 import traceback
-from fastapi import UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
 
-def read_transfer_sheet_autheader(xlsx_bytes: bytes) -> pd.DataFrame:
-    # preview without headers
-    preview = pd.read_excel(
-        BytesIO(xlsx_bytes),
-        sheet_name="Transfer Status",
-        header=None,
-        nrows=20,
-        engine="openpyxl",
-    )
+def _q(dt: pd.Timestamp) -> int:
+    return (dt.month - 1) // 3 + 1
 
-    header_row = None
-    for i in range(len(preview)):
-        row_vals = preview.iloc[i].astype(str).str.replace("\u00A0", " ").str.strip().str.lower().tolist()
-        if "period starts" in row_vals:
-            header_row = i
-            break
+def get_vintage(start_date, end_date) -> str:
+    s = pd.to_datetime(start_date, errors="coerce")
+    e = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(s) or pd.isna(e):
+        return ""
+    return f"V{(s.year % 100):02d}Q{_q(s)}"
 
-    if header_row is None:
-        raise ValueError(
-            "Could not locate header row containing 'Period Starts'. "
-            f"Preview rows: {preview.head(10).values.tolist()}"
-        )
+def highlight(start_date, end_date) -> bool:
+    s = pd.to_datetime(start_date, errors="coerce")
+    e = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(s) or pd.isna(e):
+        return False
+    return _q(s) != _q(e)
 
-    # read full sheet using detected header row
-    df = pd.read_excel(
-        BytesIO(xlsx_bytes),
-        sheet_name="Transfer Status",
-        header=header_row,
-        engine="openpyxl",
-    )
-    return df
-
-
-@app.post("/m1/transfer-status/xlsx")
-async def transfer_status_vintage(file: UploadFile = File(...)):
+@app.post("/m1/transfer-vintage/json")
+async def transfer_vintage_json(file: UploadFile = File(...)):
     try:
         b = await file.read()
-        df_transfer = read_transfer_sheet_autheader(b)
 
-        df_out = attach_transfer_vintage(df_transfer, add_flags=False)
+        # Auto-detect header row containing "Period Starts"
+        preview = pd.read_excel(BytesIO(b), sheet_name="Transfer Status", header=None, nrows=20, engine="openpyxl")
+        header_row = None
+        for i in range(len(preview)):
+            row = preview.iloc[i].astype(str).str.replace("\u00A0", " ").str.strip().str.lower().tolist()
+            if "period starts" in row and "period ends" in row and "vintage" in row:
+                header_row = i
+                break
+        if header_row is None:
+            raise ValueError("Cannot find header row containing Period Starts/Ends/Vintage")
 
-        out_buf = BytesIO()
-        with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-            df_out.to_excel(writer, sheet_name="Transfer Status", index=False)
-        out_buf.seek(0)
+        df = pd.read_excel(BytesIO(b), sheet_name="Transfer Status", header=header_row, engine="openpyxl")
+        df.columns = [str(c).replace("\u00A0", " ").strip() for c in df.columns]
 
-        return StreamingResponse(
-            out_buf,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'},
-        )
+        # Find IN/OUT columns by "base name" (handles 'Period Starts .1' etc.)
+        import re
+        def base(h):
+            s = str(h).replace("\u00A0", " ").strip().lower()
+            s = re.sub(r"\s*\.\d+\s*$", "", s)  # remove .1 /  .1
+            return s
+
+        def nth(name, k):
+            m = [c for c in df.columns if base(c) == name.lower()]
+            if len(m) < k:
+                raise KeyError(f"Need {k} occurrence(s) of '{name}', found {len(m)}. Columns={list(df.columns)}")
+            return m[k-1]
+
+        in_start, in_end = nth("Period Starts", 1), nth("Period Ends", 1)
+        out_start, out_end = nth("Period Starts", 2), nth("Period Ends", 2)
+
+        in_v = [get_vintage(a, b) for a, b in zip(df[in_start], df[in_end])]
+        out_v = [get_vintage(a, b) for a, b in zip(df[out_start], df[out_end])]
+
+        in_h = [highlight(a, b) for a, b in zip(df[in_start], df[in_end])]
+        out_h = [highlight(a, b) for a, b in zip(df[out_start], df[out_end])]
+
+        return JSONResponse({"in_vintage": in_v, "out_vintage": out_v, "in_highlight": in_h, "out_highlight": out_h})
 
     except Exception as e:
-        tb = traceback.format_exc()
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{tb}")
-
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
 
