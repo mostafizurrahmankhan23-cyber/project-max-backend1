@@ -85,6 +85,74 @@ def build_device_status(
         Columns: SL, Plant ID, Country, Plant Owner's %, Selling Price, Cost of MWh
     """
 
+def build_device_status_from_existing_status(
+    df_devices: pd.DataFrame,
+    df_existing_status: pd.DataFrame,
+    selling_price: float = 4.5,
+) -> pd.DataFrame:
+
+    devices = df_devices.copy()
+    devices["Status"] = devices["Status"].astype(str)
+
+    approved_df = devices[
+        devices["Status"].str.contains("approved", case=False, na=False)
+    ].copy()
+
+    approved_df["Device ID"] = approved_df["Device ID"].astype(str).str.strip()
+    approved_df["Country"] = approved_df["Country"].astype(str).str.strip()
+
+    # ---- Use Device Status as lookup table ----
+    status = df_existing_status.copy()
+
+    col_plant = pick(status.columns, "Plant ID", "Device ID")  # handle either style
+    col_pct   = pick(status.columns, "Plant Owner's %", "Ownership %", "%", "Percent")
+    col_sp    = None
+    try:
+        col_sp = pick(status.columns, "Selling Price", "SellingPrice")
+    except KeyError:
+        col_sp = None
+
+    status[col_plant] = status[col_plant].astype(str).str.strip()
+    status["Plant Owner's %"] = status[col_pct].map(fmt_percent)
+
+    # Keep only lookup columns
+    keep_cols = [col_plant, "Plant Owner's %"]
+    if col_sp:
+        keep_cols.append(col_sp)
+
+    status_small = status[keep_cols].drop_duplicates(subset=[col_plant])
+
+    merged = approved_df.merge(
+        status_small,
+        left_on="Device ID",
+        right_on=col_plant,
+        how="left",
+    )
+
+    merged["Plant Owner's %"] = merged["Plant Owner's %"].fillna("")
+
+    # Selling price: prefer existing if present; else use default
+    if col_sp:
+        merged["Selling Price"] = pd.to_numeric(merged[col_sp], errors="coerce").fillna(float(selling_price))
+    else:
+        merged["Selling Price"] = float(selling_price)
+
+    merged["Numeric_%"] = merged["Plant Owner's %"].map(parse_percent)
+    merged["Cost of MWh"] = merged["Numeric_%"] * merged["Selling Price"]
+
+    output_df = pd.DataFrame(
+        {
+            "SL": range(1, len(merged) + 1),
+            "Plant ID": merged["Device ID"],
+            "Country": merged["Country"],
+            "Plant Owner's %": merged["Plant Owner's %"],
+            "Selling Price": merged["Selling Price"].round(4),
+            "Cost of MWh": merged["Cost of MWh"].round(4),
+        }
+    )
+
+    return output_df
+
     # --- 1) Filter approved devices and clean ID / Country ---
     devices = df_devices.copy()
 
