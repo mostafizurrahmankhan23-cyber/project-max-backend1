@@ -600,15 +600,12 @@ async def transfer_status_vintage(
     file: UploadFile = File(..., description="Transfer Status Excel"),
 ):
     try:
-        df_transfer = pd.read_excel(file.file, sheet_name="Transfer Status")
+        # ✅ header is on row 3 because row 2 is the IN/OUT banner
+        df_transfer = pd.read_excel(file.file, sheet_name="Transfer Status", header=2)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read Excel: {e}")
 
-    # ✅ NEW: uses your duplicate-header logic
-    df_out = attach_transfer_vintage(
-        df_transfer,
-        add_flags=False,
-    )
+    df_out = attach_transfer_vintage(df_transfer, add_flags=False)
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -618,10 +615,9 @@ async def transfer_status_vintage(
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'
-        },
+        headers={"Content-Disposition": 'attachment; filename="transfer_status_with_vintage.xlsx"'},
     )
+
 
 
 
