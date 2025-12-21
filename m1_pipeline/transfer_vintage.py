@@ -31,18 +31,31 @@ def _first_existing(df: pd.DataFrame, names: list[str]) -> str:
             return n
     raise KeyError(f"None of {names} found in columns: {list(df.columns)}")
 
+import re
+
 def _norm_header(h: str) -> str:
     return str(h).replace("\u00A0", " ").strip().lower()
 
-def _find_nth(df: pd.DataFrame, target: str, n: int) -> str:
-    target_norm = _norm_header(target)
-    matches = [c for c in df.columns if _norm_header(c) == target_norm]
+def _base_header(h: str) -> str:
+    """
+    Convert:
+      'Period Starts'      -> 'period starts'
+      'Period Starts.1'    -> 'period starts'
+      'Period Starts .1'   -> 'period starts'
+    """
+    s = _norm_header(h)
+    s = re.sub(r"\s*\.\d+\s*$", "", s)   # remove optional space + .<num> suffix
+    return s
+
+def _find_nth_base(df: pd.DataFrame, base: str, n: int) -> str:
+    base = _base_header(base)
+    matches = [c for c in df.columns if _base_header(c) == base]
     if len(matches) < n:
         raise KeyError(
-            f"Need {n} occurrence(s) of '{target_norm}', found {len(matches)}. "
-            f"Columns: {list(df.columns)}"
+            f"Need {n} occurrence(s) of '{base}', found {len(matches)}. Columns: {list(df.columns)}"
         )
-    return matches[n - 1]
+    return matches[n-1]
+
 
 
 def attach_transfer_vintage(df_transfer: pd.DataFrame, add_flags: bool = False) -> pd.DataFrame:
@@ -52,13 +65,14 @@ def attach_transfer_vintage(df_transfer: pd.DataFrame, add_flags: bool = False) 
     df.columns = [str(c).replace("\u00A0", " ").strip() for c in df.columns]
 
     # IN = 1st occurrence, OUT = 2nd occurrence
-    in_start = _find_nth(df, "Period Starts", 1)
-    in_end   = _find_nth(df, "Period Ends", 1)
-    in_vin   = _find_nth(df, "Vintage", 1)
+    in_start  = _find_nth_base(df, "Period Starts", 1)
+    in_end    = _find_nth_base(df, "Period Ends", 1)
+    in_vin    = _find_nth_base(df, "Vintage", 1)
+    
+    out_start = _find_nth_base(df, "Period Starts", 2)
+    out_end   = _find_nth_base(df, "Period Ends", 2)
+    out_vin   = _find_nth_base(df, "Vintage", 2)
 
-    out_start = _find_nth(df, "Period Starts", 2)
-    out_end   = _find_nth(df, "Period Ends", 2)
-    out_vin   = _find_nth(df, "Vintage", 2)
 
     df[in_vin]  = df.apply(lambda r: get_vintage(r.get(in_start, ""),  r.get(in_end, "")),  axis=1)
     df[out_vin] = df.apply(lambda r: get_vintage(r.get(out_start, ""), r.get(out_end, "")), axis=1)
