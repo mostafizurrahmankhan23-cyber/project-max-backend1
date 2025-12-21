@@ -753,7 +753,9 @@ async def device_wise_sales_full_xlsx(
         issuance_df   = pd.read_excel(issuance_file.file)
         device_df     = pd.read_excel(device_file.file)
         redemption_df = pd.read_excel(redemption_file.file)
-        transfer_df   = pd.read_excel(transfer_file.file)
+        tbytes = await transfer_file.read()
+        transfer_df = read_transfer_sheet_autheader(tbytes)
+
 
         df_out = fill_device_wise_sales(
             device_df,
