@@ -487,22 +487,37 @@ async def issuance_status_xlsx(
 
 
 
+from io import BytesIO
+import pandas as pd
+import traceback
+from fastapi import HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse
+
 @app.post("/m1/cost-redemption/json")
 async def cost_redemption_json(
     device_status_file: UploadFile = File(...),
     redemption_file: UploadFile = File(...),
 ):
     try:
-        df_dev = pd.read_excel(device_status_file.file)
-        df_red = pd.read_excel(redemption_file.file)
-        df_out, stats = attach_redemption_cost(df_dev, df_red)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        dev_bytes = await device_status_file.read()
+        red_bytes = await redemption_file.read()
 
-    return JSONResponse({
-        "rows": df_out.to_dict(orient="records"),
-        "stats": stats,
-    })
+        df_dev = pd.read_excel(BytesIO(dev_bytes))
+        df_red = pd.read_excel(BytesIO(red_bytes))
+
+        df_out, stats = attach_redemption_cost(df_dev, df_red)
+
+        return JSONResponse({
+            "rows": df_out.to_dict(orient="records"),
+            "stats": stats,
+        })
+
+    except KeyError as e:
+        raise HTTPException(status_code=422, detail=f"Missing column: {str(e)}")
+    except Exception as e:
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{tb}")
+
 
 @app.post("/m1/cost-redemption/xlsx")
 async def cost_redemption_xlsx(
