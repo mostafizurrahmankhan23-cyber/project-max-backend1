@@ -386,16 +386,35 @@ from fastapi import UploadFile, File
 from fastapi.responses import JSONResponse
 import pandas as pd
 
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+from io import BytesIO
+import pandas as pd
+import traceback
+
 @app.post("/m1/device-status/json")
 async def device_status_json(
     devices_file: UploadFile = File(...),
     status_file: UploadFile = File(...),
 ):
-    df_devices = pd.read_excel(devices_file.file)
-    df_status  = pd.read_excel(status_file.file)
+    try:
+        devices_bytes = await devices_file.read()
+        status_bytes  = await status_file.read()
 
-    out = build_device_status_from_existing_status(df_devices, df_status, selling_price=4.5)
-    return JSONResponse({"rows": out.to_dict(orient="records")})
+        df_devices = pd.read_excel(BytesIO(devices_bytes))
+        df_status  = pd.read_excel(BytesIO(status_bytes))
+
+        out = build_device_status_from_existing_status(df_devices, df_status, selling_price=4.5)
+        return JSONResponse({"rows": out.to_dict(orient="records")})
+
+    except KeyError as e:
+        # column missing / pick() failed
+        raise HTTPException(status_code=422, detail=f"Column missing: {str(e)}")
+    except Exception as e:
+        # keep this during debugging; later replace with proper logging
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{tb}")
+
 
 
 
