@@ -487,6 +487,37 @@ async def issuance_status_xlsx(
 
 
 
+import pandas as pd
+import numpy as np
+from datetime import date, datetime
+
+def df_records_json_safe(df: pd.DataFrame):
+    df2 = df.copy()
+
+    # Convert datetime-like columns to ISO strings
+    for col in df2.columns:
+        if pd.api.types.is_datetime64_any_dtype(df2[col]):
+            df2[col] = df2[col].dt.strftime("%Y-%m-%d")  # or .astype(str)
+
+    # Convert any remaining Timestamp objects inside object columns
+    def conv(x):
+        if isinstance(x, (pd.Timestamp, datetime, date)):
+            # keep time if present
+            try:
+                return x.isoformat()
+            except Exception:
+                return str(x)
+        if x is None:
+            return ""
+        # optional: normalize NaN
+        if isinstance(x, float) and np.isnan(x):
+            return ""
+        return x
+
+    df2 = df2.applymap(conv)
+    return df2.to_dict(orient="records")
+
+
 from io import BytesIO
 import pandas as pd
 import traceback
@@ -508,9 +539,10 @@ async def cost_redemption_json(
         df_out, stats = attach_redemption_cost(df_dev, df_red)
 
         return JSONResponse({
-            "rows": df_out.to_dict(orient="records"),
+            "rows": df_records_json_safe(df_out),
             "stats": stats,
         })
+
 
     except KeyError as e:
         raise HTTPException(status_code=422, detail=f"Missing column: {str(e)}")
