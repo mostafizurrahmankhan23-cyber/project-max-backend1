@@ -32,19 +32,18 @@ def _first_existing(df: pd.DataFrame, names: list[str]) -> str:
     raise KeyError(f"None of {names} found in columns: {list(df.columns)}")
 
 def _norm_header(h: str) -> str:
-    # normalize: strip, collapse spaces, remove non-breaking spaces
     return str(h).replace("\u00A0", " ").strip().lower()
 
 def _find_nth(df: pd.DataFrame, target: str, n: int) -> str:
-    """
-    Find the nth occurrence (1-based) of a header whose normalized name == target.
-    Example: target="period starts", n=2 returns OUT "Period Starts".
-    """
-    target = target.lower()
-    matches = [c for c in df.columns if _norm_header(c) == target]
+    target_norm = _norm_header(target)
+    matches = [c for c in df.columns if _norm_header(c) == target_norm]
     if len(matches) < n:
-        raise KeyError(f"Need {n} occurrence(s) of '{target}', found {len(matches)}. Columns: {list(df.columns)}")
+        raise KeyError(
+            f"Need {n} occurrence(s) of '{target_norm}', found {len(matches)}. "
+            f"Columns: {list(df.columns)}"
+        )
     return matches[n - 1]
+
 
 def attach_transfer_vintage(df_transfer: pd.DataFrame, add_flags: bool = False) -> pd.DataFrame:
     df = df_transfer.copy()
