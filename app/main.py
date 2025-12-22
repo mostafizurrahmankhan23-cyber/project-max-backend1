@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 
-from .core import parse_one_pdf, LABELS_FLAT, build_sales_dataframe
+from .core import parse_one_pdf, LABELS_FLAT, build_sales_dataframe, filename_sort_key
 from m1_pipeline.device_id import attach_device_ids
 from m1_pipeline.device_status import build_device_status, build_device_status_from_existing_status
 from m1_pipeline.issuance_status import build_issuance_status
@@ -135,6 +135,10 @@ async def process_pdfs(files: List[UploadFile] = File(...)):
                 paths.append(path)
 
             # Use parse_one_pdf for each uploaded file
+            # ✅ Sort PDFs like Colab (by date in filename + optional trailing sequence)
+            paths = sorted(paths, key=filename_sort_key)
+            
+            # ✅ Parse in that order
             all_devices, all_certs = [], []
             for pdf in paths:
                 d, c = parse_one_pdf(pdf)
@@ -143,6 +147,7 @@ async def process_pdfs(files: List[UploadFile] = File(...)):
                     row["Device Index"] = base_index_offset + row["Device Index"]
                 all_devices.extend(d)
                 all_certs.extend(c)
+
 
         # Build DataFrames (similar to parse_pdf_folder)
         df_devices = pd.DataFrame(
@@ -182,8 +187,31 @@ async def process_pdfs(files: List[UploadFile] = File(...)):
         ].str.split(" - ", expand=True)
 
         df_sales = build_sales_dataframe(df_merged2)
+        
+        # ✅ Insert EXACTLY 2 blank rows between different PDFs (grouped by Source PDF)
+        gap_rows = []
+        prev_pdf = None
+        
+        for _, row in df_sales.iterrows():
+            curr_pdf = str(row.get("Source PDF", ""))
+            if prev_pdf is not None and curr_pdf != prev_pdf:
+                gap_rows.append({c: "" for c in df_sales.columns})
+                gap_rows.append({c: "" for c in df_sales.columns})
+            gap_rows.append(row.to_dict())
+            prev_pdf = curr_pdf
+        
+        # ✅ Re-number Sl cleanly (optional but recommended)
+        sl = 1
+        for r in gap_rows:
+            is_blank = all(str(v).strip() == "" for v in r.values())
+            if is_blank:
+                r["Sl"] = ""
+            else:
+                r["Sl"] = sl
+                sl += 1
+        
+        return JSONResponse(content=gap_rows)
 
-        return JSONResponse(content=df_sales.to_dict(orient="records"))
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
