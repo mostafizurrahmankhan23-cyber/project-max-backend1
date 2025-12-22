@@ -26,20 +26,29 @@ def pick(colnames, *candidates) -> str:
     raise KeyError(f"Missing columns. Need one of {candidates}. Found: {list(colnames)}")
 
 
-def normalize(name: str) -> str:
-    """
-    Normalize names for matching:
-    - ASCII fold
-    - lowercase
-    - keep letters/digits/spaces/dashes
-    """
-    if name is None:
+def normalize(name) -> str:
+    # Handle None / NaN safely
+    try:
+        import pandas as pd
+        if name is None or pd.isna(name):
+            return ""
+    except Exception:
+        if name is None:
+            return ""
+
+    s = str(name).strip()
+    if s == "" or s.lower() == "nan":
         return ""
-    name = unidecode(str(name)).lower()
-    name = name.replace("\u00a0", " ").replace("\u200b", "").replace("–", "-")
-    name = re.sub(r"[^a-z0-9\s\-]", " ", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    return name
+
+    from unidecode import unidecode
+    import re
+
+    s = unidecode(s).lower()
+    s = s.replace("\u00a0", " ").replace("\u200b", "").replace("–", "-")
+    s = re.sub(r"[^a-z0-9\s\-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 
 
 def find_best_match(name: str, ref_list: List[str], threshold: float) -> str | None:
