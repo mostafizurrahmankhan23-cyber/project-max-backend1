@@ -11,6 +11,7 @@ import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
 
 
 from .core import parse_one_pdf, LABELS_FLAT, build_sales_dataframe, filename_sort_key
@@ -365,7 +366,7 @@ async def process_device_id_json(
                 out_rows.append(next(it))
         
         # Return same structure you returned before (JSON rows)
-        return JSONResponse(content=out_rows)
+        return JSONResponse(content=jsonable_encoder(out_rows))
 
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -380,13 +381,13 @@ async def process_device_id_json(
         return df.to_dict(orient="records")
     
     
-    return JSONResponse(
-        {
-            "rows": df_to_json_safe(df_out),
-            "fuzzy_log": fuzzy_log,
-            "unmatched": df_to_json_safe(unmatched),
-        }
-    )
+    payload = {
+        "rows": out_rows,
+        "fuzzy_log": fuzzy_log,
+        "unmatched": unmatched,
+    }
+    return JSONResponse(content=jsonable_encoder(payload))
+
 
 
 
