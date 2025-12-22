@@ -22,6 +22,7 @@ from m1_pipeline.cost_redemption import attach_redemption_cost
 from m1_pipeline.transfer_vintage import attach_transfer_vintage
 from m1_pipeline.device_wise_sales import fill_device_wise_sales
 from m1_pipeline.cogs import compute_cogs
+from .sheet_chat import answer as sheet_answer
 
 
 app = FastAPI(
@@ -877,3 +878,15 @@ async def process_cogs_xlsx(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="COGS_with_costs.xlsx"'},
     )
+
+
+@app.post("/m1/sheet-chat")
+async def m1_sheet_chat(payload: dict):
+    question = str(payload.get("question","")).strip()
+    tabs = payload.get("tabs", [])
+    if not question:
+        raise HTTPException(status_code=400, detail="Missing question")
+    if not isinstance(tabs, list) or not tabs:
+        raise HTTPException(status_code=400, detail="Missing tabs data")
+    return sheet_answer(question, tabs)
+
