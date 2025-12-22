@@ -337,7 +337,36 @@ async def process_device_id_json(
         raise HTTPException(status_code=400, detail=f"Could not read registry_file: {e}")
 
     try:
-        df_out, fuzzy_log, unmatched = attach_device_ids(df_sales, df_devreg)
+        import numpy as np
+        # ---- 1) detect your blank "gap rows" (two empty rows between PDFs) ----
+        tmp = df_sales.copy()
+        
+        # convert "" / whitespace -> NaN so we can detect fully empty rows
+        tmp = tmp.replace(r"^\s*$", np.nan, regex=True)
+        
+        # a row is a "gap row" if ALL columns are empty/NaN
+        gap_mask = tmp.isna().all(axis=1)
+        
+        # keep only real data rows for matching
+        df_sales_nonblank = df_sales.loc[~gap_mask].copy()
+        
+        # ---- 2) run Step 2 logic only on real rows ----
+        df_out_nonblank, fuzzy_log, unmatched = attach_device_ids(df_sales_nonblank, df_devreg)
+        
+        # ---- 3) reinsert gap rows back in the same positions ----
+        blank_row = {c: "" for c in df_out_nonblank.columns}
+        out_rows = []
+        it = iter(df_out_nonblank.to_dict(orient="records"))
+        
+        for is_gap in gap_mask.tolist():
+            if is_gap:
+                out_rows.append(blank_row.copy())
+            else:
+                out_rows.append(next(it))
+        
+        # Return same structure you returned before (JSON rows)
+        return JSONResponse(content=out_rows)
+
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
