@@ -15,6 +15,7 @@ from fastapi.encoders import jsonable_encoder
 
 
 from .core import parse_one_pdf, LABELS_FLAT, build_sales_dataframe, filename_sort_key
+from m1_pipeline.parse_check import build_parse_check
 from m1_pipeline.device_id import attach_device_ids
 from m1_pipeline.device_status import build_device_status, build_device_status_from_existing_status
 from m1_pipeline.issuance_status import build_issuance_status
@@ -314,6 +315,23 @@ async def process_pdfs_is_xlsx(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update I/S workbook: {e}")
 
+
+
+# ============================================================
+# 1.1) M-1 Parse Check
+# ============================================================
+
+@app.post("/m1/parse-check/json")
+async def parse_check_json(payload: dict):
+    rows = payload.get("rows", [])
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="Missing rows")
+
+    df = pd.DataFrame(rows)
+    df_out = build_parse_check(df)
+
+    # return JSON-safe
+    return {"rows": df_out.replace({np.nan: ""}).to_dict(orient="records")}
 
 
 # ============================================================
