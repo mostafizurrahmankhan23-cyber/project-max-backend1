@@ -603,23 +603,26 @@ from fastapi.responses import JSONResponse
 
 @app.post("/m1/cost-redemption/json")
 async def cost_redemption_json(
-    device_status_file: UploadFile = File(...),
+    registration_file: UploadFile = File(...),
     redemption_file: UploadFile = File(...),
 ):
     try:
-        dev_bytes = await device_status_file.read()
+        reg_bytes = await registration_file.read()
         red_bytes = await redemption_file.read()
 
-        df_dev = pd.read_excel(BytesIO(dev_bytes))
+        registration_sheets = pd.read_excel(BytesIO(reg_bytes), sheet_name=None)
         df_red = pd.read_excel(BytesIO(red_bytes))
 
-        df_out, stats = attach_redemption_cost(df_dev, df_red)
+        df_out, stats = attach_redemption_cost(
+            registration_sheets=registration_sheets,
+            df_redemption=df_red,
+            quarterly_start_year=25,
+        )
 
         return JSONResponse({
             "rows": df_records_json_safe(df_out),
             "stats": stats,
         })
-
 
     except KeyError as e:
         raise HTTPException(status_code=422, detail=f"Missing column: {str(e)}")
@@ -630,17 +633,17 @@ async def cost_redemption_json(
 
 @app.post("/m1/cost-redemption/xlsx")
 async def cost_redemption_xlsx(
-    device_status_file: UploadFile = File(..., description="Device Status Excel"),
+    registration_file: UploadFile = File(..., description="Registration workbook with GRIT and Delnotic"),
     redemption_file: UploadFile = File(..., description="Redemption Status Excel"),
 ):
     """
     Return Redemption Status Excel with 'Cost of MWh' filled
-    using Device Status (Plant Owner's % × Selling Price).
+    using Registration Data workbook (GRIT priority, Delnotic fallback).
     """
     try:
-        df_dev = pd.read_excel(device_status_file.file)
+        reg_bytes = await registration_file.read()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read device_status_file: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read registration_file: {e}")
 
     try:
         df_red = pd.read_excel(redemption_file.file)
@@ -648,15 +651,19 @@ async def cost_redemption_xlsx(
         raise HTTPException(status_code=400, detail=f"Could not read redemption_file: {e}")
 
     try:
-        df_out, stats = attach_redemption_cost(df_dev, df_red)
+        registration_sheets = pd.read_excel(BytesIO(reg_bytes), sheet_name=None)
+
+        df_out, stats = attach_redemption_cost(
+            registration_sheets=registration_sheets,
+            df_redemption=df_red,
+            quarterly_start_year=25,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"CostRedemption error: {e}")
 
-    # Write to in-memory Excel
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df_out.to_excel(writer, sheet_name="Redemption Status", index=False)
-        # optional debug sheet with stats
         pd.DataFrame([stats]).to_excel(writer, sheet_name="Stats", index=False)
     buffer.seek(0)
 
