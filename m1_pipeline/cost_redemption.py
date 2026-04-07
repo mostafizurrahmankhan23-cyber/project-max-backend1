@@ -3,112 +3,342 @@
 from __future__ import annotations
 
 import re
+from io import BytesIO
+from typing import Dict, Tuple
+
 import pandas as pd
-from typing import Tuple, Dict
 
 
 # ---------- helpers ----------
 
 def normalize_id(s: str) -> str:
     """
-    Make IDs comparable:
+    Normalize device/plant IDs for matching.
 
-    - cast to string, upper-case
-    - strip spaces
-    - remove all whitespace
-    - keep only letters, digits and dot (.)
+    Example:
+      ' 2.75ses10000 ' -> '2.75SES10000'
     """
     if s is None:
         return ""
     s = str(s).upper().strip()
-    s = re.sub(r"\s+", "", s)          # remove all whitespace
-    s = re.sub(r"[^A-Z0-9\.]", "", s)  # keep A-Z, 0-9 and '.'
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"[^A-Z0-9\.]", "", s)
     return s
+
+
+def normalize_text(s: str) -> str:
+    if s is None:
+        return ""
+    return str(s).strip().upper()
 
 
 def pick(colnames, *candidates) -> str:
     """
-    Find the first column whose name matches any of the `candidates`
-    (case-insensitive). Raises KeyError if none are found.
+    Return the first matching column name from candidates, case-insensitive.
     """
-    lower_map = {str(c).lower(): c for c in colnames}
+    lower_map = {str(c).strip().lower(): c for c in colnames}
     for cand in candidates:
-        key = str(cand).lower()
+        key = str(cand).strip().lower()
         if key in lower_map:
             return lower_map[key]
-    raise KeyError(f"Could not find any of {candidates} in columns: {list(colnames)}")
+    raise KeyError(
+        f"Could not find any of {candidates} in columns: {list(colnames)}"
+    )
+
+
+def parse_percent(x) -> float:
+    """
+    Convert percent-like values to fraction.
+
+    Accepts:
+      80%
+      80.00%
+      80
+      0.8
+
+    Returns:
+      0.8
+    """
+    if pd.isna(x):
+        return float("nan")
+
+    s = str(x).strip().replace(",", "")
+    if not s:
+        return float("nan")
+
+    if s.endswith("%"):
+        try:
+            return float(s[:-1]) / 100.0
+        except ValueError:
+            return float("nan")
+
+    try:
+        val = float(s)
+    except ValueError:
+        return float("nan")
+
+    # If user stored 80 instead of 0.8, convert to fraction
+    return val / 100.0 if val > 1 else val
+
+
+def parse_number(x) -> float:
+    """
+    Parse numeric cell safely.
+    """
+    if pd.isna(x):
+        return float("nan")
+
+    s = str(x).strip().replace(",", "")
+    if not s:
+        return float("nan")
+
+    try:
+        return float(s)
+    except ValueError:
+        return float("nan")
+
+
+def first_existing_column(columns, candidates) -> str | None:
+    """
+    Return first candidate column that exists, case-insensitive.
+    """
+    lower_cols = {str(c).strip().lower(): c for c in columns}
+    for cand in candidates:
+        actual = lower_cols.get(str(cand).strip().lower())
+        if actual:
+            return actual
+    return None
+
+
+def get_price_col_from_vintage(
+    vintage: str,
+    columns,
+    quarterly_start_year: int = 25,
+) -> str | None:
+    """
+    Determine which selling-price column should be used from vintage.
+
+    Business rule:
+    - If year < quarterly_start_year:
+        V23Q1..V23Q4 -> V23 Selling Price
+        V24Q1..V24Q4 -> V24 Selling Price
+    - If year >= quarterly_start_year:
+        V25Q1 -> V25 Q1 Selling Price
+        V26Q2 -> V26 Q2 Selling Price
+        V27Q3 -> V27 Q3 Selling Price
+        ... and so on for future years.
+
+    Supports both:
+      'V25 Q1 Selling Price'
+      'V25Q1 Selling Price'
+    """
+    if vintage is None:
+        return None
+
+    v = str(vintage).strip().upper()
+
+    # Example matches: V23Q1, V24Q4, V27Q2
+    m = re.fullmatch(r"V(\d{2})Q([1-4])", v)
+    if not m:
+        return None
+
+    yy = int(m.group(1))   # 23, 24, 25, 26, ...
+    qq = int(m.group(2))   # 1, 2, 3, 4
+
+    # Older vintages use one yearly price column
+    if yy < quarterly_start_year:
+        return first_existing_column(
+            columns,
+            [f"V{yy} Selling Price"]
+        )
+
+    # Newer vintages use quarter-wise price columns
+    return first_existing_column(
+        columns,
+        [
+            f"V{yy} Q{qq} Selling Price",
+            f"V{yy}Q{qq} Selling Price",
+        ]
+    )
+
+
+# ---------- registration workbook logic ----------
+
+def build_registration_lookup_from_workbook(
+    reg_sheets: dict[str, pd.DataFrame]
+) -> dict[str, dict]:
+    """
+    Build normalized Device ID -> row dict lookup.
+
+    Priority rule:
+      1. GRIT
+      2. Delnotic
+
+    So if a Device ID exists in both, GRIT wins.
+    """
+    lookup: dict[str, dict] = {}
+    priority_order = ["GRIT", "Delnotic"]
+
+    for sheet_name in priority_order:
+        df = reg_sheets.get(sheet_name)
+        if df is None or df.empty:
+            continue
+
+        df = df.copy()
+        df.columns = [str(c).strip() for c in df.columns]
+
+        try:
+            col_device = pick(df.columns, "Device ID", "Plant ID", "Plant Id", "Plant_ID")
+            col_owner = pick(
+                df.columns,
+                "Plant Owner's %",
+                "Plant Owners %",
+                "Plant Owner %",
+                "Owner %",
+            )
+        except KeyError:
+            # Skip tabs that don't have the required registration structure
+            continue
+
+        for _, row in df.iterrows():
+            norm_id = normalize_id(row.get(col_device, ""))
+            if not norm_id:
+                continue
+
+            # GRIT wins because it is processed first
+            if norm_id not in lookup:
+                record = row.to_dict()
+                record["_sheet_name"] = sheet_name
+                record["_owner_col"] = col_owner
+                lookup[norm_id] = record
+
+    return lookup
 
 
 # ---------- core function ----------
 
 def attach_redemption_cost(
-    df_device_status: pd.DataFrame,
+    registration_sheets: dict[str, pd.DataFrame],
     df_redemption: pd.DataFrame,
+    quarterly_start_year: int = 25,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """
-    Attach 'Cost of MWh' to Redemption Status by matching IDs.
+    Attach/computed 'Cost of MWh' into Redemption Status.
 
-    Inputs
-    ------
-    df_device_status : DataFrame
-        Device Status sheet, must contain:
-          - Plant ID column   (e.g. 'Plant ID')
-          - Cost of MWh column (e.g. 'Cost of MWh')
-    df_redemption : DataFrame
-        Redemption Status sheet, must contain:
-          - Device ID column   (e.g. 'Device ID')
-        May or may not already contain a 'Cost of MWh' column.
+    Calculation:
+        Cost of MWh = Plant Owner's % × matched selling price
 
-    Returns
-    -------
-    df_out : DataFrame
-        df_redemption copy with 'Cost of MWh' filled/updated.
-    stats : dict
-        {"hits": <matched rows>, "misses": <unmatched rows>}
+    Matching rule:
+        Redemption Status.Device ID -> search in GRIT first, then Delnotic
+
+    Vintage rule:
+        Older years -> yearly selling price column
+        Newer years -> quarter-wise selling price column
     """
-
-    dev = df_device_status.copy()
     red = df_redemption.copy()
 
-    # --- find relevant columns (robust to header variations) ---
-    dev_col_pid = pick(dev.columns, "Plant ID", "Plant Id", "Plant_ID", "Device ID")
-    dev_col_cost = pick(dev.columns, "Cost of MWh", "Cost/MWh", "Cost_MWh")
-
     red_col_did = pick(red.columns, "Device ID", "Plant ID", "Plant Id", "Plant_ID")
+    red_col_vintage = pick(red.columns, "Vintage")
 
-    # ensure Redemption has a Cost-of-MWh column
-    if any(name.lower() == "cost of mwh" for name in red.columns):
+    # Ensure output column exists
+    if any(str(c).strip().lower() == "cost of mwh" for c in red.columns):
         red_col_cost = next(
-            c for c in red.columns if str(c).lower() == "cost of mwh"
+            c for c in red.columns if str(c).strip().lower() == "cost of mwh"
         )
     else:
         red_col_cost = "Cost of MWh"
         red[red_col_cost] = ""
 
-    # --- build lookup: Plant ID → Cost of MWh ---
-    pid_to_cost = {}
-    for _, row in dev.iterrows():
-        pid = normalize_id(row.get(dev_col_pid, ""))
-        if not pid:
-            continue
-        cost = row.get(dev_col_cost, "")
-        pid_to_cost[pid] = cost  # last one wins; adjust if needed
+    reg_lookup = build_registration_lookup_from_workbook(registration_sheets)
 
-    # --- fill Cost of MWh in Redemption Status ---
     hits = 0
     misses = 0
-    costs = []
+    missing_device = 0
+    missing_vintage = 0
+    missing_price_column = 0
+    invalid_values = 0
+
+    out_costs = []
 
     for _, row in red.iterrows():
         device_id = normalize_id(row.get(red_col_did, ""))
-        cost = pid_to_cost.get(device_id, "")
-        if cost != "":
-            hits += 1
-        else:
+        vintage = row.get(red_col_vintage, "")
+
+        if not device_id or device_id not in reg_lookup:
+            out_costs.append("")
             misses += 1
-        costs.append(cost)
+            missing_device += 1
+            continue
 
-    red[red_col_cost] = costs
+        reg_row = reg_lookup[device_id]
+        owner_col = reg_row["_owner_col"]
 
-    stats = {"hits": hits, "misses": misses}
+        price_col = get_price_col_from_vintage(
+            vintage=vintage,
+            columns=list(reg_row.keys()),
+            quarterly_start_year=quarterly_start_year,
+        )
+
+        if not vintage or str(vintage).strip() == "":
+            out_costs.append("")
+            misses += 1
+            missing_vintage += 1
+            continue
+
+        if not price_col:
+            out_costs.append("")
+            misses += 1
+            missing_price_column += 1
+            continue
+
+        owner_frac = parse_percent(reg_row.get(owner_col, ""))
+        selling_price = parse_number(reg_row.get(price_col, ""))
+
+        if pd.isna(owner_frac) or pd.isna(selling_price):
+            out_costs.append("")
+            misses += 1
+            invalid_values += 1
+            continue
+
+        cost = round(owner_frac * selling_price, 4)
+        out_costs.append(cost)
+        hits += 1
+
+    red[red_col_cost] = out_costs
+
+    stats = {
+        "hits": hits,
+        "misses": misses,
+        "missing_device": missing_device,
+        "missing_vintage": missing_vintage,
+        "missing_price_column": missing_price_column,
+        "invalid_values": invalid_values,
+    }
+
     return red, stats
+
+
+# ---------- optional convenience function for uploaded workbook files ----------
+
+def attach_redemption_cost_from_excel_files(
+    registration_file_bytes: bytes,
+    redemption_file_bytes: bytes,
+    quarterly_start_year: int = 25,
+) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """
+    Convenience wrapper if your API receives raw uploaded XLSX bytes.
+
+    registration_file_bytes:
+        workbook containing GRIT and Delnotic sheets
+
+    redemption_file_bytes:
+        workbook/sheet for Redemption Status
+    """
+    registration_sheets = pd.read_excel(BytesIO(registration_file_bytes), sheet_name=None)
+    df_redemption = pd.read_excel(BytesIO(redemption_file_bytes))
+
+    return attach_redemption_cost(
+        registration_sheets=registration_sheets,
+        df_redemption=df_redemption,
+        quarterly_start_year=quarterly_start_year,
+    )
