@@ -574,24 +574,25 @@ def df_records_json_safe(df: pd.DataFrame):
     # Convert datetime-like columns to ISO strings
     for col in df2.columns:
         if pd.api.types.is_datetime64_any_dtype(df2[col]):
-            df2[col] = df2[col].dt.strftime("%Y-%m-%d")  # or .astype(str)
+            df2[col] = df2[col].dt.strftime("%Y-%m-%d")
 
-    # Convert any remaining Timestamp objects inside object columns
     def conv(x):
         if isinstance(x, (pd.Timestamp, datetime, date)):
-            # keep time if present
             try:
                 return x.isoformat()
             except Exception:
                 return str(x)
         if x is None:
             return ""
-        # optional: normalize NaN
-        if isinstance(x, float) and np.isnan(x):
-            return ""
+        try:
+            if pd.isna(x):
+                return ""
+        except Exception:
+            pass
         return x
 
-    df2 = df2.applymap(conv)
+    # apply cell-wise without DataFrame.applymap
+    df2 = df2.apply(lambda col: col.map(conv))
     return df2.to_dict(orient="records")
 
 
