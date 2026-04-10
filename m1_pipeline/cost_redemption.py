@@ -177,7 +177,12 @@ def build_registration_lookup_from_workbook(
     So if a Device ID exists in both, GRIT wins.
     """
     lookup: dict[str, dict] = {}
-    priority_order = ["GRIT", "Delnotic"]
+    priority_order = [
+        "GRIT",
+        "Registration Data-GRIT",
+        "Delnotic",
+        "Registration Data-Delnotic",
+    ]
 
     for sheet_name in priority_order:
         df = reg_sheets.get(sheet_name)
