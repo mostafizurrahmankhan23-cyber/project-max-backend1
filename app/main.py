@@ -353,23 +353,32 @@ async def process_device_id_json(
         df_sales = pd.read_excel(BytesIO(sales_bytes), engine="openpyxl")
         df_devreg = pd.read_excel(BytesIO(registry_bytes), engine="openpyxl")
 
+        # DEBUG LOGS
+        print("=== /m1/device-id/json DEBUG START ===")
+        print("sales_file filename:", sales_file.filename)
+        print("registry_file filename:", registry_file.filename)
+        print("SALES COLUMNS:", df_sales.columns.tolist())
+        print("REGISTRY COLUMNS:", df_devreg.columns.tolist())
+        print("SALES SHAPE:", df_sales.shape)
+        print("REGISTRY SHAPE:", df_devreg.shape)
+        print("SALES HEAD:", df_sales.head(3).to_dict(orient="records"))
+        print("REGISTRY HEAD:", df_devreg.head(3).to_dict(orient="records"))
+        print("=== /m1/device-id/json DEBUG END ===")
+
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read uploaded Excel files: {e}")
 
     try:
         import numpy as np
 
-        # detect blank gap rows in Redemption Status
         tmp = df_sales.copy()
         tmp = tmp.replace(r"^\s*$", np.nan, regex=True)
         gap_mask = tmp.isna().all(axis=1)
 
-        # match only real data rows
         df_sales_nonblank = df_sales.loc[~gap_mask].copy()
 
         df_out_nonblank, fuzzy_log, unmatched = attach_device_ids(df_sales_nonblank, df_devreg)
 
-        # reinsert blank rows in original positions
         blank_row = {c: "" for c in df_out_nonblank.columns}
         out_rows = []
         it = iter(df_out_nonblank.to_dict(orient="records"))
@@ -394,7 +403,6 @@ async def process_device_id_json(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Matching error: {e}")
-
 
 @app.post("/m1/device-id/xlsx")
 async def process_device_id_xlsx(
