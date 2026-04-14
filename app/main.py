@@ -338,35 +338,43 @@ async def parse_check_json(payload: dict):
 # 2) M-1 DeviceID: attach Device IDs from Excel files
 # ============================================================
 
+from fastapi import Body
+
 @app.post("/m1/device-id/json")
-async def process_device_id_json(
-    sales_file: UploadFile = File(..., description="Redemption Status Excel"),
-    registry_file: UploadFile = File(..., description="Device Registration Excel"),
-):
+async def process_device_id_json(payload: dict = Body(...)):
     """
     Return Redemption+DeviceID as JSON.
+    Expects:
+      {
+        "sales_rows": [...],
+        "registry_rows": [...]
+      }
     """
     try:
-        sales_bytes = await sales_file.read()
-        registry_bytes = await registry_file.read()
+        sales_rows = payload.get("sales_rows", [])
+        registry_rows = payload.get("registry_rows", [])
 
-        df_sales = pd.read_excel(BytesIO(sales_bytes), engine="openpyxl")
-        df_devreg = pd.read_excel(BytesIO(registry_bytes), engine="openpyxl")
+        if not isinstance(sales_rows, list) or not sales_rows:
+            raise HTTPException(status_code=400, detail="Missing or empty sales_rows")
+        if not isinstance(registry_rows, list) or not registry_rows:
+            raise HTTPException(status_code=400, detail="Missing or empty registry_rows")
 
-        # DEBUG LOGS
-        print("=== /m1/device-id/json DEBUG START ===")
-        print("sales_file filename:", sales_file.filename)
-        print("registry_file filename:", registry_file.filename)
+        df_sales = pd.DataFrame(sales_rows)
+        df_devreg = pd.DataFrame(registry_rows)
+
+        print("=== /m1/device-id/json JSON DEBUG START ===")
         print("SALES COLUMNS:", df_sales.columns.tolist())
         print("REGISTRY COLUMNS:", df_devreg.columns.tolist())
         print("SALES SHAPE:", df_sales.shape)
         print("REGISTRY SHAPE:", df_devreg.shape)
         print("SALES HEAD:", df_sales.head(3).to_dict(orient="records"))
         print("REGISTRY HEAD:", df_devreg.head(3).to_dict(orient="records"))
-        print("=== /m1/device-id/json DEBUG END ===")
+        print("=== /m1/device-id/json JSON DEBUG END ===")
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read uploaded Excel files: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not build DataFrames from JSON: {e}")
 
     try:
         import numpy as np
@@ -389,15 +397,13 @@ async def process_device_id_json(
             else:
                 out_rows.append(next(it))
 
-        payload = {
+        return JSONResponse(content=jsonable_encoder({
             "rows": out_rows,
             "fuzzy_log": [
                 {"Sales Name": a, "Registry Name": b} for a, b in fuzzy_log
             ],
             "unmatched": unmatched.to_dict(orient="records"),
-        }
-
-        return JSONResponse(content=jsonable_encoder(payload))
+        }))
 
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
