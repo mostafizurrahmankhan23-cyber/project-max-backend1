@@ -344,70 +344,56 @@ async def process_device_id_json(
     registry_file: UploadFile = File(..., description="Device Registration Excel"),
 ):
     """
-    Return Redemption+DeviceID as JSON (for table display in frontend).
+    Return Redemption+DeviceID as JSON.
     """
     try:
-        df_sales = pd.read_excel(sales_file.file)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read sales_file: {e}")
+        sales_bytes = await sales_file.read()
+        registry_bytes = await registry_file.read()
 
-    try:
-        df_devreg = pd.read_excel(registry_file.file)
+        df_sales = pd.read_excel(BytesIO(sales_bytes), engine="openpyxl")
+        df_devreg = pd.read_excel(BytesIO(registry_bytes), engine="openpyxl")
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read registry_file: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read uploaded Excel files: {e}")
 
     try:
         import numpy as np
-        # ---- 1) detect your blank "gap rows" (two empty rows between PDFs) ----
+
+        # detect blank gap rows in Redemption Status
         tmp = df_sales.copy()
-        
-        # convert "" / whitespace -> NaN so we can detect fully empty rows
         tmp = tmp.replace(r"^\s*$", np.nan, regex=True)
-        
-        # a row is a "gap row" if ALL columns are empty/NaN
         gap_mask = tmp.isna().all(axis=1)
-        
-        # keep only real data rows for matching
+
+        # match only real data rows
         df_sales_nonblank = df_sales.loc[~gap_mask].copy()
-        
-        # ---- 2) run Step 2 logic only on real rows ----
+
         df_out_nonblank, fuzzy_log, unmatched = attach_device_ids(df_sales_nonblank, df_devreg)
-        
-        # ---- 3) reinsert gap rows back in the same positions ----
+
+        # reinsert blank rows in original positions
         blank_row = {c: "" for c in df_out_nonblank.columns}
         out_rows = []
         it = iter(df_out_nonblank.to_dict(orient="records"))
-        
+
         for is_gap in gap_mask.tolist():
             if is_gap:
                 out_rows.append(blank_row.copy())
             else:
                 out_rows.append(next(it))
-        
-        # Return same structure you returned before (JSON rows)
-        return JSONResponse(content=jsonable_encoder(out_rows))
+
+        payload = {
+            "rows": out_rows,
+            "fuzzy_log": [
+                {"Sales Name": a, "Registry Name": b} for a, b in fuzzy_log
+            ],
+            "unmatched": unmatched.to_dict(orient="records"),
+        }
+
+        return JSONResponse(content=jsonable_encoder(payload))
 
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Matching error: {e}")
-
-    def df_to_json_safe(df: pd.DataFrame) -> list[dict]:
-        df = df.copy()
-        for col in df.columns:
-            if pd.api.types.is_datetime64_any_dtype(df[col]):
-                df[col] = df[col].dt.strftime("%Y-%m-%d")
-        return df.to_dict(orient="records")
-    
-    
-    payload = {
-        "rows": out_rows,
-        "fuzzy_log": fuzzy_log,
-        "unmatched": unmatched,
-    }
-    return JSONResponse(content=jsonable_encoder(payload))
-
-
 
 
 @app.post("/m1/device-id/xlsx")
