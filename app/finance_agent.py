@@ -3,32 +3,125 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 
-# ----------------------------
-# Utilities
-# ----------------------------
+# ============================================================
+# Small utilities
+# ============================================================
 
-def _norm(s: str) -> str:
+def _norm(s: Any) -> str:
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
 
 def _safe_str(x: Any) -> str:
     if x is None:
         return ""
-    s = str(x)
+    s = str(x).strip()
     if s.lower() in {"nan", "nat", "none"}:
         return ""
-    return s.strip()
+    return s
 
-def _maybe_to_datetime(s: pd.Series) -> pd.Series:
-    # tolerate mixed formats
-    return pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
 
-def _maybe_to_numeric(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce")
+def _to_num(x: Any) -> float:
+    s = _safe_str(x).replace(",", "")
+    if not s:
+        return 0.0
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def _to_num_or_none(x: Any) -> Optional[float]:
+    s = _safe_str(x).replace(",", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    cmap = {_norm(c): c for c in df.columns}
+    for cand in candidates:
+        c = cmap.get(_norm(cand))
+        if c:
+            return c
+    return None
+
+
+def _normalize_id(x: Any) -> str:
+    s = _safe_str(x).upper()
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"[^A-Z0-9\.]", "", s)
+    return s
+
+
+def _normalize_name(x: Any) -> str:
+    s = _safe_str(x).lower()
+    s = re.sub(r"[^a-z0-9\s\-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _normalize_vintage(x: Any) -> str:
+    s = _safe_str(x).upper().replace(" ", "")
+    m = re.search(r"(V\d{2}Q[1-4])", s)
+    return m.group(1) if m else ""
+
+
+def _extract_expected_mwh_from_filename(source_pdf: Any) -> Optional[float]:
+    s = _safe_str(source_pdf)
+    if not s:
+        return None
+    m = re.search(r"([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*MWH", s, flags=re.I)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except Exception:
+        return None
+
+
+def _add_issue(
+    issues: List[Dict[str, Any]],
+    *,
+    issue_type: str,
+    tab: str,
+    row: Optional[int] = None,
+    priority: str = "Medium",
+    source_pdf: str = "",
+    client_name: str = "",
+    device_id: str = "",
+    device_name: str = "",
+    vintage: str = "",
+    summary: str = "",
+    likely_cause: str = "",
+    suggested_fix: str = "",
+) -> None:
+    issues.append({
+        "Issue Type": issue_type,
+        "Tab": tab,
+        "Row No": row if row is not None else "",
+        "Source PDF": source_pdf,
+        "Client Name": client_name,
+        "Device ID": device_id,
+        "Device Name": device_name,
+        "Vintage": vintage,
+        "Issue Summary": summary,
+        "Likely Cause": likely_cause,
+        "Suggested Fix": suggested_fix,
+        "Priority": priority,
+    })
+
+
+# ============================================================
+# Snapshot -> DataFrame
+# ============================================================
 
 def _drop_all_blank_rows(df: pd.DataFrame) -> pd.DataFrame:
     tmp = df.copy()
@@ -37,591 +130,1158 @@ def _drop_all_blank_rows(df: pd.DataFrame) -> pd.DataFrame:
     blank = tmp.apply(lambda r: all(_safe_str(v) == "" for v in r.values), axis=1)
     return df.loc[~blank].copy()
 
+
 def _to_df(tab: Dict[str, Any]) -> pd.DataFrame:
     header = [str(h).strip() for h in tab.get("header", [])]
     rows = tab.get("rows", [])
+
     data: List[List[Any]] = []
     row_ids: List[int] = []
 
     for r in rows:
         row_ids.append(int(r.get("row", 0)))
-        vals = r.get("values", [])
-        data.append(vals[: len(header)])
+        vals = list(r.get("values", []))
+        vals = vals[: len(header)]
+        while len(vals) < len(header):
+            vals.append("")
+        data.append(vals)
+
+    if not header:
+        return pd.DataFrame()
 
     df = pd.DataFrame(data, columns=header)
-    df.insert(0, "__row", row_ids)  # audit row index in Google Sheet
-    df.columns = [c.strip().lower() for c in df.columns]
-    df = _drop_all_blank_rows(df)
-    return df
-
-def _find_col(df: pd.DataFrame, *cands: str) -> Optional[str]:
-    cols = list(df.columns)
-    cmap = {_norm(c): c for c in cols}
-    for cand in cands:
-        k = _norm(cand)
-        if k in cmap:
-            return cmap[k]
-    return None
-
-def _has_cols(df: pd.DataFrame, cols_any: List[str]) -> bool:
-    existing = set(df.columns)
-    for c in cols_any:
-        if _norm(c) in {_norm(x) for x in existing}:
-            return True
-    return False
+    df.insert(0, "__row", row_ids)
+    df.columns = [str(c).strip() for c in df.columns]
+    return _drop_all_blank_rows(df)
 
 
-# ----------------------------
-# Transfer Status parser (IN/OUT blocks)
-# Your Transfer Status sheet contains two tables side-by-side with headers in row 1.
-# We convert it into two normalized dataframes: transfer_in, transfer_out
-# ----------------------------
+def _build_tables(snapshot: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
+    tabs = snapshot.get("tabs", {})
+    out: Dict[str, pd.DataFrame] = {}
+    for name, tab in tabs.items():
+        try:
+            out[name] = _to_df(tab)
+        except Exception:
+            continue
+    return out
+
+
+# ============================================================
+# Transfer Status parser
+# ============================================================
 
 def _parse_transfer_status(df_raw: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """
-    Accepts df produced from _to_df(tab) where columns are 'in', 'unnamed: 1', etc.
-    The first row contains headers for IN block and OUT block.
-    """
-    # We need the first row (header row) as actual headers
     if df_raw.empty:
         return {}
 
-    # Remove audit col for processing, keep __row to reattach later
     df = df_raw.copy()
-
-    # The first data row in Transfer Status often contains headers like:
-    # IN side: Sl, Plant ID, Period Starts, Period Ends, Vintage, MWh, Total Cost, Cost per MWh
-    # OUT side: Sl, Plant ID, Period Starts, Period Ends, Vintage, MWh, Cost/MWh, Plant Owner Cost (USD)
-    # We detect this by checking row 0 (after dropping blanks)
-    header_row = df.iloc[0].to_dict()
-
-    # Split columns into left and right blocks by finding the 'out' marker column (often named "out" or "sl" after unnamed gap)
-    # In your sample, columns were: 'in', 'unnamed: 1'...'unnamed: 8', 'out', 'unnamed:10'...
     cols = list(df.columns)
-    # locate column named 'out' (normalized)
-    out_col_idx = None
+
+    # identify "OUT" split column
+    out_idx = None
     for i, c in enumerate(cols):
         if _norm(c) == "out":
-            out_col_idx = i
+            out_idx = i
             break
-    if out_col_idx is None:
-        # If can't detect, return raw as fallback
-        return {"transfer": df_raw}
 
-    left_cols = cols[:out_col_idx]          # includes 'in'
-    right_cols = cols[out_col_idx:]         # includes 'out'
+    if out_idx is None or len(df) < 1:
+        return {"Transfer Status": df_raw}
 
-    def build_block(block_cols: List[str], block_name: str) -> pd.DataFrame:
+    header_row = df.iloc[0].to_dict()
+
+    def build_block(block_cols: List[str], tab_name: str) -> pd.DataFrame:
         block = df[block_cols].copy()
-        # Rename using header_row values (first row)
+
         new_cols = []
         for c in block_cols:
             hv = _safe_str(header_row.get(c, ""))
             new_cols.append(hv if hv else c)
-        block.columns = [str(x).strip() for x in new_cols]
-        # Drop the header row itself
+
+        block.columns = [str(c).strip() for c in new_cols]
         block = block.iloc[1:].copy()
-        # Bring back audit row numbers
         block.insert(0, "__row", df["__row"].iloc[1:].astype(int).tolist())
-        # Normalize columns
-        block.columns = [str(c).strip().lower() for c in block.columns]
         block = _drop_all_blank_rows(block)
 
-        # Normalize expected column names
+        # normalize columns
         rename_map = {
-            "sl": "sl",
-            "plant id": "device id",
-            "period starts": "start date",
-            "period ends": "end date",
-            "mwh": "mwh",
-            "total cost": "total cost",
-            "cost per mwh": "cost per mwh",
-            "cost/mwh": "cost per mwh",
-            "plant owner cost (usd)": "plant owner cost (usd)",
-            "vintage": "vintage",
+            "Plant ID": "Plant ID",
+            "Period Starts": "Period Starts",
+            "Period Ends": "Period Ends",
+            "Vintage": "Vintage",
+            "MWh": "MWh",
+            "Total Cost": "Total Cost",
+            "Cost per MWh": "Cost per MWh",
+            "Cost/MWh": "Cost per MWh",
+            "Plant Owner Cost (USD)": "Plant Owner Cost (USD)",
         }
-        for k, v in rename_map.items():
-            if k in block.columns and v not in block.columns:
-                block.rename(columns={k: v}, inplace=True)
 
-        # Type conversions
-        for dc in ["start date", "end date"]:
-            if dc in block.columns:
-                block[dc] = _maybe_to_datetime(block[dc])
-        for nc in ["mwh", "total cost", "cost per mwh", "plant owner cost (usd)"]:
-            if nc in block.columns:
-                block[nc] = _maybe_to_numeric(block[nc])
+        cols2 = list(block.columns)
+        for old in cols2:
+            for k, v in rename_map.items():
+                if _norm(old) == _norm(k):
+                    block.rename(columns={old: v}, inplace=True)
 
-        block["__tab"] = block_name
         return block
 
-    transfer_in = build_block(left_cols, "Transfer Status (IN)")
-    transfer_out = build_block(right_cols, "Transfer Status (OUT)")
-    return {"transfer_in": transfer_in, "transfer_out": transfer_out}
+    left_cols = cols[:out_idx]
+    right_cols = cols[out_idx:]
+
+    return {
+        "Transfer Status (IN)": build_block(left_cols, "Transfer Status (IN)"),
+        "Transfer Status (OUT)": build_block(right_cols, "Transfer Status (OUT)"),
+    }
 
 
-# ----------------------------
-# Query parsing
-# ----------------------------
+# ============================================================
+# Registry lookup
+# ============================================================
+
+@dataclass
+class RegistryLookup:
+    ids: set[str]
+    id_to_name: Dict[str, str]
+    name_to_id: Dict[str, str]
+
+
+def _build_registry_lookup(tables: Dict[str, pd.DataFrame]) -> RegistryLookup:
+    ids: set[str] = set()
+    id_to_name: Dict[str, str] = {}
+    name_to_id: Dict[str, str] = {}
+
+    for tab_name in ["Registration Data-GRIT", "Registration Data-Delnotic"]:
+        df = tables.get(tab_name)
+        if df is None or df.empty:
+            continue
+
+        col_id = _first_existing(df, ["Device ID", "Plant ID", "Plant Id"])
+        col_name = _first_existing(df, ["Name", "Device Name", "Plant Name", "Project Name"])
+        if not col_id:
+            continue
+
+        for _, row in df.iterrows():
+            did = _normalize_id(row.get(col_id, ""))
+            if not did:
+                continue
+            ids.add(did)
+
+            if col_name:
+                nm = _safe_str(row.get(col_name, ""))
+                if did not in id_to_name and nm:
+                    id_to_name[did] = nm
+                nn = _normalize_name(nm)
+                if nn and nn not in name_to_id:
+                    name_to_id[nn] = did
+
+    return RegistryLookup(ids=ids, id_to_name=id_to_name, name_to_id=name_to_id)
+
+
+# ============================================================
+# Compute-mode support (keep your old capability)
+# ============================================================
 
 @dataclass
 class Query:
     tab_hint: Optional[str] = None
     metric: Optional[str] = None
     dims: List[str] = None
-    op: str = "sum"  # sum, avg, count
+    op: str = "sum"
     top_n: Optional[int] = None
-    filters: List[Tuple[str, str, str]] = None  # (field, operator, value)
-    date_from: Optional[pd.Timestamp] = None
-    date_to: Optional[pd.Timestamp] = None
 
     def __post_init__(self):
         self.dims = self.dims or []
-        self.filters = self.filters or []
 
 
 _METRIC_SYNONYMS = {
-    "number of certificate": ["number of certificate", "number of certificates", "certificates", "irec", "issued irec", "sold irec"],
-    "mwh": ["mwh", "energy", "generation"],
-    "total cost": ["total cost", "issuance cost", "redemption cost", "cost"],
+    "number of certificate": ["number of certificate", "number of certificates", "certificates", "irec"],
+    "mwh": ["mwh", "energy"],
+    "total cost": ["total cost", "plant owner cost (bdt)", "redemption cost", "issuance cost"],
     "cost per mwh": ["cost per mwh", "cost/mwh", "cost of mwh"],
-    "total (bdt)": ["total (bdt)", "revenue", "sales", "total bdt"],
-    "sales rate (usd)": ["sales rate (usd)", "price usd", "selling price"],
-    "plant owner cost (usd)": ["plant owner cost (usd)", "owner cost", "cost usd"],
+    "total (bdt)": ["total (bdt)", "total amount (bdt)", "sales", "revenue"],
 }
 
 _DIM_SYNONYMS = {
     "client name": ["client name", "client"],
     "device id": ["device id", "plant id"],
     "device name": ["device name", "device"],
-    "vendor name": ["vendor name", "vendor"],
     "vintage": ["vintage", "quarter"],
     "date": ["date"],
-    "start date": ["start date", "production starts", "period starts"],
-    "end date": ["end date", "production ends", "period ends"],
 }
 
-_KEYWORDS_SUM = ["total", "sum"]
-_KEYWORDS_AVG = ["average", "avg", "mean"]
-_KEYWORDS_COUNT = ["count", "how many", "number of rows"]
-_KEYWORDS_TOP = ["top", "highest", "largest", "most"]
 
-def _extract_tab_hint(q: str) -> Optional[str]:
-    # allow: tab: Redemption Status
-    m = re.search(r"\btab\s*:\s*([A-Za-z0-9 _\-/]+)", q, flags=re.I)
-    return m.group(1).strip() if m else None
+def _parse_compute_question(question: str) -> Query:
+    ql = question.lower()
 
-def _extract_top_n(q: str) -> Optional[int]:
-    m = re.search(r"\btop\s+(\d+)\b", q, flags=re.I)
-    return int(m.group(1)) if m else None
+    op = "sum"
+    if any(k in ql for k in ["average", "avg", "mean"]):
+        op = "avg"
+    elif any(k in ql for k in ["count", "how many"]):
+        op = "count"
 
-def _extract_op(q: str) -> str:
-    ql = q.lower()
-    if any(k in ql for k in _KEYWORDS_AVG):
-        return "avg"
-    if any(k in ql for k in _KEYWORDS_COUNT):
-        return "count"
-    return "sum"
+    top_n = None
+    m_top = re.search(r"\btop\s+(\d+)\b", question, flags=re.I)
+    if m_top:
+        top_n = int(m_top.group(1))
 
-def _extract_metric(q: str) -> Optional[str]:
-    ql = q.lower()
+    tab_hint = None
+    m_tab = re.search(r"\btab\s*:\s*([A-Za-z0-9 _\-/\(\)]+)", question, flags=re.I)
+    if m_tab:
+        tab_hint = m_tab.group(1).strip()
+
+    metric = None
     for canon, syns in _METRIC_SYNONYMS.items():
-        for s in syns:
-            if s in ql:
-                return canon
-    # fallback: try patterns like "total <col>"
-    m = re.search(r"\b(total|sum|avg|average|count)\s+([a-zA-Z0-9 _/%\-\(\)]+)", q, flags=re.I)
-    if m:
-        return _norm(m.group(2))
-    return None
+        if any(s in ql for s in syns):
+            metric = canon
+            break
 
-def _extract_dims(q: str) -> List[str]:
-    # "by <dim>" possibly multiple: "by client name and vintage"
-    m = re.search(r"\bby\s+(.+)$", q, flags=re.I)
-    if not m:
-        return []
-    tail = m.group(1)
-    # stop if contains "where" like clause
-    tail = re.split(r"\b(where|filter|for)\b", tail, flags=re.I)[0]
-    parts = re.split(r",| and ", tail, flags=re.I)
-    dims = []
-    for p in parts:
-        pp = _norm(p)
-        if not pp:
-            continue
-        # map synonyms
-        for canon, syns in _DIM_SYNONYMS.items():
-            if any(_norm(s) == pp or pp in _norm(s) or _norm(s) in pp for s in syns):
-                dims.append(canon)
-                break
-        else:
-            dims.append(pp)
-    # unique preserve order
-    out = []
-    for d in dims:
-        if d not in out:
-            out.append(d)
-    return out
+    dims: List[str] = []
+    m_by = re.search(r"\bby\s+(.+)$", question, flags=re.I)
+    if m_by:
+        tail = re.split(r"\b(where|for)\b", m_by.group(1), flags=re.I)[0]
+        parts = re.split(r",| and ", tail, flags=re.I)
+        for p in parts:
+            pp = _norm(p)
+            if not pp:
+                continue
+            for canon, syns in _DIM_SYNONYMS.items():
+                if any(pp == _norm(s) or pp in _norm(s) or _norm(s) in pp for s in syns):
+                    dims.append(canon)
+                    break
 
-def _extract_date_range(q: str) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-    # supports: between 2024-01-01 and 2024-12-31
-    m = re.search(r"\bbetween\s+([0-9/\-]+)\s+and\s+([0-9/\-]+)\b", q, flags=re.I)
-    if m:
-        d1 = pd.to_datetime(m.group(1), errors="coerce")
-        d2 = pd.to_datetime(m.group(2), errors="coerce")
-        return (d1 if pd.notna(d1) else None, d2 if pd.notna(d2) else None)
-    # supports: from X to Y
-    m = re.search(r"\bfrom\s+([0-9/\-]+)\s+to\s+([0-9/\-]+)\b", q, flags=re.I)
-    if m:
-        d1 = pd.to_datetime(m.group(1), errors="coerce")
-        d2 = pd.to_datetime(m.group(2), errors="coerce")
-        return (d1 if pd.notna(d1) else None, d2 if pd.notna(d2) else None)
-    return (None, None)
-
-def _extract_filters(q: str) -> List[Tuple[str, str, str]]:
-    """
-    Supports:
-      client name = ABM
-      cost per mwh > 3.5
-      vintage = V24Q1
-      device id contains 1.7
-    """
-    filters: List[Tuple[str, str, str]] = []
-
-    # explicit contains
-    for m in re.finditer(r"([A-Za-z0-9 _/%]+)\s+contains\s+'?([^']+)'?", q, flags=re.I):
-        filters.append((m.group(1).strip(), "contains", m.group(2).strip()))
-
-    # comparators
-    for m in re.finditer(r"([A-Za-z0-9 _/%\.\-]+)\s*(=|!=|>=|<=|>|<)\s*'?(.*?)'?(?:\s|$)", q, flags=re.I):
-        field = m.group(1).strip()
-        op = m.group(2)
-        val = m.group(3).strip()
-        # avoid catching "tab:" or "top 5"
-        if _norm(field) in {"tab", "top"}:
-            continue
-        # avoid empty
-        if not field or not val:
-            continue
-        filters.append((field, op, val))
-
-    # also allow: "for ABM FASHIONS" -> interpret as client name contains
-    m = re.search(r"\bfor\s+(.+)$", q, flags=re.I)
-    if m:
-        val = m.group(1).strip()
-        if val and len(val) >= 3:
-            filters.append(("client name", "contains", val))
-
-    # de-dup
-    out = []
-    for f in filters:
-        if f not in out:
-            out.append(f)
-    return out
-
-def parse_question(question: str) -> Query:
-    q = question.strip()
-    tab_hint = _extract_tab_hint(q)
-    top_n = _extract_top_n(q)
-    op = _extract_op(q)
-    metric = _extract_metric(q)
-    dims = _extract_dims(q)
-    d1, d2 = _extract_date_range(q)
-    filters = _extract_filters(q)
-    return Query(
-        tab_hint=tab_hint,
-        metric=metric,
-        dims=dims,
-        op=op,
-        top_n=top_n,
-        filters=filters,
-        date_from=d1,
-        date_to=d2,
-    )
+    return Query(tab_hint=tab_hint, metric=metric, dims=dims, op=op, top_n=top_n)
 
 
-# ----------------------------
-# Tab selection & execution
-# ----------------------------
-
-def _pick_metric_col(df: pd.DataFrame, metric_canon: str) -> Optional[str]:
-    # Map canonical metric name to likely actual columns
-    syns = _METRIC_SYNONYMS.get(metric_canon, [metric_canon])
-    # direct match
+def _pick_metric_col(df: pd.DataFrame, metric: str) -> Optional[str]:
+    syns = _METRIC_SYNONYMS.get(metric, [metric])
+    cmap = {_norm(c): c for c in df.columns}
     for s in syns:
-        col = _find_col(df, s)
-        if col:
-            return col
-    # heuristic fallback: find any col that includes tokens
-    mc = _norm(metric_canon)
+        if _norm(s) in cmap:
+            return cmap[_norm(s)]
     for c in df.columns:
-        if mc in _norm(c):
+        if metric and _norm(metric) in _norm(c):
             return c
     return None
 
-def _pick_dim_col(df: pd.DataFrame, dim_canon: str) -> Optional[str]:
-    syns = _DIM_SYNONYMS.get(dim_canon, [dim_canon])
+
+def _pick_dim_col(df: pd.DataFrame, dim: str) -> Optional[str]:
+    syns = _DIM_SYNONYMS.get(dim, [dim])
+    cmap = {_norm(c): c for c in df.columns}
     for s in syns:
-        col = _find_col(df, s)
-        if col:
-            return col
-    dc = _norm(dim_canon)
-    for c in df.columns:
-        if dc in _norm(c):
-            return c
+        if _norm(s) in cmap:
+            return cmap[_norm(s)]
     return None
 
-def _apply_filters(df: pd.DataFrame, filters: List[Tuple[str, str, str]]) -> pd.DataFrame:
-    out = df.copy()
-    for field, op, value in filters:
-        col = _pick_dim_col(out, field) or _find_col(out, field)
-        if not col:
-            # can't apply this filter
-            continue
 
-        if op == "contains":
-            out = out[out[col].astype(str).str.contains(value, case=False, na=False)]
-            continue
-
-        # numeric compare if possible
-        s = out[col]
-        s_num = _maybe_to_numeric(s)
-        is_num = s_num.notna().any()
-
-        if is_num and re.fullmatch(r"[+-]?\d+(\.\d+)?", value):
-            v = float(value)
-            if op == "=":
-                out = out[s_num == v]
-            elif op == "!=":
-                out = out[s_num != v]
-            elif op == ">":
-                out = out[s_num > v]
-            elif op == "<":
-                out = out[s_num < v]
-            elif op == ">=":
-                out = out[s_num >= v]
-            elif op == "<=":
-                out = out[s_num <= v]
-            continue
-
-        # string compare
-        sv = out[col].astype(str)
-        if op == "=":
-            out = out[sv.str.strip().str.lower() == value.strip().lower()]
-        elif op == "!=":
-            out = out[sv.str.strip().str.lower() != value.strip().lower()]
-        else:
-            # unsupported string compare
-            pass
-    return out
-
-def _apply_date_range(df: pd.DataFrame, q: Query) -> pd.DataFrame:
-    if q.date_from is None and q.date_to is None:
-        return df
-
-    out = df.copy()
-
-    # choose best date column
-    date_col = _find_col(out, "date") or _find_col(out, "start date") or _find_col(out, "production starts") or _find_col(out, "period starts")
-    if not date_col:
-        return out
-
-    dt = _maybe_to_datetime(out[date_col])
-    mask = pd.Series(True, index=out.index)
-    if q.date_from is not None and pd.notna(q.date_from):
-        mask &= dt >= q.date_from
-    if q.date_to is not None and pd.notna(q.date_to):
-        mask &= dt <= q.date_to
-    return out.loc[mask].copy()
-
-def _tab_score_for_query(tab_name: str, df: pd.DataFrame, q: Query) -> int:
+def _tab_score_for_compute(tab_name: str, df: pd.DataFrame, q: Query) -> int:
     score = 0
-
-    # tab hint boost
     if q.tab_hint and _norm(q.tab_hint) in _norm(tab_name):
         score += 50
-
-    # metric boost
-    if q.metric:
-        mc = _pick_metric_col(df, q.metric)
-        if mc:
-            score += 20
-
-    # dims boost
+    if q.metric and _pick_metric_col(df, q.metric):
+        score += 20
     for d in q.dims:
         if _pick_dim_col(df, d):
             score += 5
-
-    # common finance tabs
-    tn = _norm(tab_name)
-    if "exchange" in tn and q.metric in {"total (bdt)", "sales rate (usd)"}:
-        score += 10
-    if "cogs" in tn and q.metric in {"total cost", "issuance cost", "redemption cost"}:
-        score += 10
-    if "redemption status" in tn and q.metric in {"number of certificate", "cost per mwh"}:
-        score += 10
-    if "issuance status" in tn and q.metric == "mwh":
-        score += 10
-
     return score
 
-def _compute(df: pd.DataFrame, q: Query, tab_name: str) -> Dict[str, Any]:
-    df0 = df.copy()
-    df0["__tab"] = tab_name
 
-    # Apply date range first, then other filters
-    df1 = _apply_date_range(df0, q)
-    df2 = _apply_filters(df1, q.filters)
+def _run_compute(question: str, tables: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+    q = _parse_compute_question(question)
 
-    # Dimensions
-    dim_cols: List[str] = []
-    for d in q.dims:
-        c = _pick_dim_col(df2, d)
-        if c:
-            dim_cols.append(c)
+    scored: List[Tuple[int, str]] = []
+    for name, df in tables.items():
+        if df.empty:
+            continue
+        scored.append((_tab_score_for_compute(name, df, q), name))
+    scored.sort(reverse=True)
 
-    # Metric
-    metric_col = None
-    if q.op != "count":
-        metric_col = _pick_metric_col(df2, q.metric or "number of certificate")
-        if not metric_col:
-            # fallback: try any numeric col if metric missing
-            for c in df2.columns:
-                if c in {"__row", "__tab"}:
+    for _, name in scored[:8]:
+        df = tables[name].copy()
+        if df.empty:
+            continue
+
+        if q.op == "count":
+            if q.dims:
+                dim_cols = [_pick_dim_col(df, d) for d in q.dims]
+                dim_cols = [c for c in dim_cols if c]
+                if not dim_cols:
                     continue
-                if _maybe_to_numeric(df2[c]).notna().any():
-                    metric_col = c
-                    break
+                res = df.groupby(dim_cols, dropna=False).size().reset_index(name="count")
+            else:
+                res = pd.DataFrame({"count": [int(df.shape[0])]})
+            preview = res.head(12).to_string(index=False)
+            return {
+                "mode": "compute",
+                "answer": f"Computed from tab '{name}'.",
+                "table_preview": preview,
+                "audit": [{"tab": name, "row": int(r)} for r in df["__row"].head(40).tolist()],
+                "meta": {"tab_used": name, "op": q.op},
+            }
 
-    # Compute
-    if q.op == "count":
-        # count rows, or count distinct dim if asked
-        if dim_cols:
-            res = df2.groupby(dim_cols, dropna=False).size().reset_index(name="count")
-        else:
-            res = pd.DataFrame({"count": [int(df2.shape[0])]})
-        result_metric_name = "count"
-    else:
-        x = _maybe_to_numeric(df2[metric_col]).fillna(0.0)
+        metric_col = _pick_metric_col(df, q.metric or "")
+        if not metric_col:
+            continue
+
+        x = pd.to_numeric(df[metric_col], errors="coerce").fillna(0.0)
+
+        dim_cols = [_pick_dim_col(df, d) for d in q.dims]
+        dim_cols = [c for c in dim_cols if c]
+
         if dim_cols:
             if q.op == "avg":
-                res = df2.assign(__x=x).groupby(dim_cols, dropna=False)["__x"].mean().reset_index(name=f"avg_{metric_col}")
-                result_metric_name = f"avg_{metric_col}"
+                res = df.assign(__x=x).groupby(dim_cols, dropna=False)["__x"].mean().reset_index(name=f"avg_{metric_col}")
             else:
-                res = df2.assign(__x=x).groupby(dim_cols, dropna=False)["__x"].sum().reset_index(name=f"sum_{metric_col}")
-                result_metric_name = f"sum_{metric_col}"
+                res = df.assign(__x=x).groupby(dim_cols, dropna=False)["__x"].sum().reset_index(name=f"sum_{metric_col}")
+            if q.top_n:
+                metric_name = res.columns[-1]
+                res = res.sort_values(metric_name, ascending=False).head(q.top_n)
         else:
             if q.op == "avg":
                 res = pd.DataFrame({f"avg_{metric_col}": [float(x.mean())]})
-                result_metric_name = f"avg_{metric_col}"
             else:
                 res = pd.DataFrame({f"sum_{metric_col}": [float(x.sum())]})
-                result_metric_name = f"sum_{metric_col}"
 
-    # Top N
-    if q.top_n and dim_cols and result_metric_name in res.columns:
-        res = res.sort_values(result_metric_name, ascending=False).head(q.top_n)
-
-    # Audit rows: show first 40 contributing rows from df2
-    audit = [{"tab": tab_name, "row": int(r)} for r in df2["__row"].head(40).tolist() if pd.notna(r)]
-
-    # Preview
-    table_preview = res.head(12).to_string(index=False)
+        preview = res.head(12).to_string(index=False)
+        return {
+            "mode": "compute",
+            "answer": f"Computed from tab '{name}'.",
+            "table_preview": preview,
+            "audit": [{"tab": name, "row": int(r)} for r in df["__row"].head(40).tolist()],
+            "meta": {"tab_used": name, "op": q.op, "metric_col": metric_col},
+        }
 
     return {
-        "answer": _format_answer(tab_name, q, res, result_metric_name, dim_cols),
-        "table_preview": table_preview,
-        "audit": audit,
-        "meta": {
-            "tab_used": tab_name,
-            "op": q.op,
-            "metric": q.metric,
-            "metric_col": metric_col,
-            "dims": dim_cols,
-            "filtered_rows": int(df2.shape[0]),
-            "top_n": q.top_n,
-        }
+        "mode": "compute",
+        "answer": "Could not match your compute query to a suitable tab/metric.",
+        "table_preview": "",
+        "audit": [],
+        "meta": {},
     }
 
-def _format_answer(tab_name: str, q: Query, res: pd.DataFrame, metric_name: str, dim_cols: List[str]) -> str:
-    # Human-readable answer
-    base = f"Computed from tab '{tab_name}'."
-    if not dim_cols and metric_name in res.columns and len(res) == 1:
-        v = res.iloc[0][metric_name]
-        return f"{base} {metric_name} = {v:.6g}" if isinstance(v, (int, float)) else f"{base} {metric_name} = {v}"
-    if dim_cols:
-        return f"{base} Showing {metric_name} by {', '.join(dim_cols)}."
-    return f"{base} Result computed."
 
-# ----------------------------
-# Public API: answer_finance
-# ----------------------------
+# ============================================================
+# Diagnostic-mode routing
+# ============================================================
+
+def _detect_intent(question: str) -> str:
+    ql = question.lower()
+
+    diag_words = [
+        "problem", "issue", "wrong", "missing", "mismatch", "flow", "not updated",
+        "why blank", "why is", "diagnose", "reconcile", "reconciliation",
+        "sold > issued", "sold greater than issued", "helper tab", "fix"
+    ]
+    compute_words = ["total", "sum", "avg", "average", "count", "top", "by", "trend"]
+
+    if any(w in ql for w in diag_words):
+        return "diagnostic"
+    if any(w in ql for w in compute_words):
+        return "compute"
+    return "diagnostic"
+
+
+def _detect_tab(question: str) -> Optional[str]:
+    ql = question.lower()
+    if "redemption" in ql:
+        return "Redemption Status"
+    if "exchange" in ql:
+        return "Exchange"
+    if "transfer" in ql:
+        return "Transfer Status"
+    if "device wise sales" in ql:
+        return "Device Wise Sales Status"
+    if "issuance status" in ql:
+        return "Issuance Status"
+    return None
+
+
+# ============================================================
+# Diagnostics: Redemption Status
+# ============================================================
+
+def _diag_redemption(tables: Dict[str, pd.DataFrame], registry: RegistryLookup) -> Dict[str, Any]:
+    df = tables.get("Redemption Status")
+    issues: List[Dict[str, Any]] = []
+
+    if df is None or df.empty:
+        return {
+            "mode": "diagnostic",
+            "answer": "Redemption Status is empty or missing.",
+            "issues": [],
+            "helper_tab": {"name": "AI Exceptions - Redemption Status", "rows": []},
+            "meta": {"tab_used": "Redemption Status"},
+        }
+
+    c_pdf = _first_existing(df, ["Source PDF"])
+    c_client = _first_existing(df, ["Client Name"])
+    c_did = _first_existing(df, ["Device ID", "Plant ID"])
+    c_dname = _first_existing(df, ["Device Name", "Plant Name"])
+    c_vintage = _first_existing(df, ["Vintage"])
+    c_cert = _first_existing(df, ["Number of Certificate", "Number of Certificates"])
+    c_cost = _first_existing(df, ["Cost of MWh"])
+    c_rate_usd = _first_existing(df, ["Rate (USD)", "Sales Rate (USD)"])
+    c_rate_bdt = _first_existing(df, ["Rate (BDT)", "Sales Rate / Exchange Rate (BDT)"])
+    c_total_cost = _first_existing(df, ["Total Plant Owner Cost (BDT)", "Plant Owner Cost (BDT)"])
+    c_total_amt = _first_existing(df, ["Total Amount (BDT)", "Total (BDT)"])
+
+    # 1) PDF total mismatch at Source PDF level
+    if c_pdf and c_cert:
+        grp = (
+            df.assign(__cert=df[c_cert].map(_to_num))
+              .groupby(c_pdf, dropna=False)["__cert"].sum()
+              .reset_index()
+        )
+        for _, row in grp.iterrows():
+            pdf = _safe_str(row[c_pdf])
+            if not pdf:
+                continue
+            expected = _extract_expected_mwh_from_filename(pdf)
+            if expected is None:
+                continue
+            actual = float(row["__cert"])
+            diff = round(actual - expected, 6)
+            if abs(diff) > 1e-9:
+                _add_issue(
+                    issues,
+                    issue_type="PDF_TOTAL_MISMATCH",
+                    tab="Redemption Status",
+                    priority="High",
+                    source_pdf=pdf,
+                    summary=f"Expected {expected:g} MWh from filename, but summed Number of Certificate = {actual:g}.",
+                    likely_cause="Missing, duplicated, or mis-entered allocation rows under the same Source PDF.",
+                    suggested_fix="Compare filename MWh total with summed Number of Certificate for this Source PDF and locate missing, duplicated, or mis-entered sale lines.",
+                )
+
+    # 2) Missing / invalid Device ID
+    for _, row in df.iterrows():
+        row_no = int(row["__row"]) if "__row" in row else None
+        pdf = _safe_str(row.get(c_pdf, "")) if c_pdf else ""
+        client = _safe_str(row.get(c_client, "")) if c_client else ""
+        did_raw = _safe_str(row.get(c_did, "")) if c_did else ""
+        did = _normalize_id(did_raw)
+        dname = _safe_str(row.get(c_dname, "")) if c_dname else ""
+        vintage = _safe_str(row.get(c_vintage, "")) if c_vintage else ""
+
+        if c_did and not did:
+            _add_issue(
+                issues,
+                issue_type="MISSING_DEVICE_ID",
+                tab="Redemption Status",
+                row=row_no,
+                priority="High",
+                source_pdf=pdf,
+                client_name=client,
+                device_name=dname,
+                vintage=vintage,
+                summary="Device ID is blank.",
+                likely_cause="Device mapping from plant name failed.",
+                suggested_fix="Match Device Name against Registration Data-GRIT first, then Registration Data-Delnotic. If still unmatched, review plant naming or add the missing plant in registration source.",
+            )
+        elif c_did and did and did not in registry.ids:
+            _add_issue(
+                issues,
+                issue_type="INVALID_DEVICE_ID",
+                tab="Redemption Status",
+                row=row_no,
+                priority="High",
+                source_pdf=pdf,
+                client_name=client,
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="Device ID does not exist in registration source.",
+                likely_cause="Typo, outdated ID, or wrong plant mapping.",
+                suggested_fix="Validate Device ID in Registration Data-GRIT first, then Registration Data-Delnotic. If absent in both, remap from plant identity.",
+            )
+
+        # Device Name mismatch only when ID exists in registry
+        if did and did in registry.id_to_name and dname:
+            reg_name = _safe_str(registry.id_to_name.get(did, ""))
+            if reg_name and _normalize_name(reg_name) != _normalize_name(dname):
+                _add_issue(
+                    issues,
+                    issue_type="DEVICE_NAME_MISMATCH",
+                    tab="Redemption Status",
+                    row=row_no,
+                    priority="Medium",
+                    source_pdf=pdf,
+                    client_name=client,
+                    device_id=did_raw,
+                    device_name=dname,
+                    vintage=vintage,
+                    summary=f"Device Name does not match registration source name '{reg_name}'.",
+                    likely_cause="Wrong or blank Device ID previously mapped, or stale device name text.",
+                    suggested_fix="Fix the Device ID first. Then align Device Name to the registered plant name from GRIT/Delnotic.",
+                )
+
+        # Missing cost of MWh
+        if c_cost and _safe_str(row.get(c_cost, "")) == "":
+            _add_issue(
+                issues,
+                issue_type="MISSING_COST_OF_MWH",
+                tab="Redemption Status",
+                row=row_no,
+                priority="Medium",
+                source_pdf=pdf,
+                client_name=client,
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="Cost of MWh is blank.",
+                likely_cause="Missing/invalid Device ID, missing vintage, or missing price setup for that vintage in registration source.",
+                suggested_fix="Check Device ID, Vintage, and matching price columns in Registration Data-GRIT first, then Registration Data-Delnotic.",
+            )
+
+        # Missing rates
+        rate_usd_missing = c_rate_usd and _safe_str(row.get(c_rate_usd, "")) == ""
+        rate_bdt_missing = c_rate_bdt and _safe_str(row.get(c_rate_bdt, "")) == ""
+        if rate_usd_missing or rate_bdt_missing:
+            _add_issue(
+                issues,
+                issue_type="RATE_MISSING",
+                tab="Redemption Status",
+                row=row_no,
+                priority="Low",
+                source_pdf=pdf,
+                client_name=client,
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="One or more manual rate fields are blank.",
+                likely_cause="Rate (USD) and/or Rate (BDT) not entered manually.",
+                suggested_fix="Fill the missing Rate (USD) and/or Rate (BDT) manually from agreed client transaction terms before relying on Total Amount (BDT).",
+            )
+
+        # Formula output missing
+        total_cost_missing = c_total_cost and _safe_str(row.get(c_total_cost, "")) == ""
+        total_amt_missing = c_total_amt and _safe_str(row.get(c_total_amt, "")) == ""
+        if total_cost_missing or total_amt_missing:
+            _add_issue(
+                issues,
+                issue_type="FORMULA_OUTPUT_MISSING",
+                tab="Redemption Status",
+                row=row_no,
+                priority="Low",
+                source_pdf=pdf,
+                client_name=client,
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="One or more formula-driven finance outputs are blank.",
+                likely_cause="Driver inputs are blank or the row formula is broken.",
+                suggested_fix="Check Number of Certificate, Cost of MWh, Rate (USD), Rate (BDT), and conversion references before treating it as a formula error.",
+            )
+
+    # PARSE_MISMATCH is separate from total mismatch: only emit if Source PDF has no parseable expected number
+    if c_pdf:
+        seen = set()
+        for _, row in df.iterrows():
+            pdf = _safe_str(row.get(c_pdf, ""))
+            if not pdf or pdf in seen:
+                continue
+            seen.add(pdf)
+            expected = _extract_expected_mwh_from_filename(pdf)
+            if expected is None:
+                _add_issue(
+                    issues,
+                    issue_type="PARSE_MISMATCH",
+                    tab="Redemption Status",
+                    priority="High",
+                    source_pdf=pdf,
+                    summary="Could not derive expected MWh from PDF filename.",
+                    likely_cause="Filename format is inconsistent or parsing of source naming convention failed.",
+                    suggested_fix="Recheck the PDF filename format and re-run parse validation. Use a consistent '<date> <mwh> MWh.pdf' style naming pattern.",
+                )
+
+    return {
+        "mode": "diagnostic",
+        "answer": _summarize_issue_set("Redemption Status", issues),
+        "issues": issues,
+        "helper_tab": {"name": "AI Exceptions - Redemption Status", "rows": issues},
+        "meta": {"tab_used": "Redemption Status"},
+    }
+
+
+# ============================================================
+# Diagnostics: Exchange
+# ============================================================
+
+def _diag_exchange(tables: Dict[str, pd.DataFrame], registry: RegistryLookup) -> Dict[str, Any]:
+    exc = tables.get("Exchange")
+    dws = tables.get("Device Wise Sales Status")
+    issues: List[Dict[str, Any]] = []
+
+    if exc is None or exc.empty:
+        return {
+            "mode": "diagnostic",
+            "answer": "Exchange is empty or missing.",
+            "issues": [],
+            "helper_tab": {"name": "AI Exceptions - Exchange", "rows": []},
+            "meta": {"tab_used": "Exchange"},
+        }
+
+    c_did = _first_existing(exc, ["Device ID", "Plant ID"])
+    c_dname = _first_existing(exc, ["Device Name", "Plant Name"])
+    c_vintage = _first_existing(exc, ["Vintage"])
+    c_cert = _first_existing(exc, ["Number of Certificate", "Number of Certificates"])
+    c_cost = _first_existing(exc, ["Cost of MWh"])
+    c_rate_usd = _first_existing(exc, ["Rate (USD)", "Sales Rate (USD)"])
+    c_rate_bdt = _first_existing(exc, ["Rate (BDT)", "Sales Rate / Exchange Rate (BDT)"])
+    c_total_cost = _first_existing(exc, ["Total Plant Owner Cost (BDT)", "Plant Owner Cost (BDT)"])
+    c_total_amt = _first_existing(exc, ["Total Amount (BDT)", "Total (BDT)"])
+
+    dws_ids: set[str] = set()
+    dws_has_row = dws is not None and not dws.empty
+    if dws_has_row:
+        dws_plant = _first_existing(dws, ["Plant ID"])
+        if dws_plant:
+            dws_ids = {_normalize_id(v) for v in dws[dws_plant]}
+
+    for _, row in exc.iterrows():
+        row_no = int(row["__row"]) if "__row" in row else None
+        did_raw = _safe_str(row.get(c_did, "")) if c_did else ""
+        did = _normalize_id(did_raw)
+        dname = _safe_str(row.get(c_dname, "")) if c_dname else ""
+        vintage = _safe_str(row.get(c_vintage, "")) if c_vintage else ""
+
+        if did and dws_has_row and did not in dws_ids:
+            _add_issue(
+                issues,
+                issue_type="SOLD_NOT_FLOWING_TO_DEVICE_WISE_SALES",
+                tab="Exchange",
+                row=row_no,
+                priority="High",
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="Exchange Device ID does not exist as Plant ID in Device Wise Sales Status.",
+                likely_cause="Missing plant row in Device Wise Sales Status or wrong Device ID in Exchange.",
+                suggested_fix="Trust Exchange first. Add the missing plant row to Device Wise Sales Status if the ID is valid; otherwise correct the Device ID in Exchange.",
+            )
+
+        if not did:
+            _add_issue(
+                issues,
+                issue_type="MISSING_DEVICE_ID",
+                tab="Exchange",
+                row=row_no,
+                priority="High",
+                device_name=dname,
+                vintage=vintage,
+                summary="Device ID is blank.",
+                likely_cause="Manual import left Device ID empty.",
+                suggested_fix="Fill Device ID from the correct plant reference before relying on downstream sold flow.",
+            )
+        elif did not in registry.ids:
+            _add_issue(
+                issues,
+                issue_type="INVALID_DEVICE_ID",
+                tab="Exchange",
+                row=row_no,
+                priority="High",
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="Device ID does not exist in registration source.",
+                likely_cause="Wrong manual import value.",
+                suggested_fix="Correct the Device ID in Exchange. Validate against Registration Data-GRIT first, then Registration Data-Delnotic.",
+            )
+
+        if c_cost and _safe_str(row.get(c_cost, "")) == "":
+            _add_issue(
+                issues,
+                issue_type="MISSING_COST_OF_MWH",
+                tab="Exchange",
+                row=row_no,
+                priority="Medium",
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="Cost of MWh is blank.",
+                likely_cause="Manual import missed cost-side setup or Device ID/vintage does not map cleanly.",
+                suggested_fix="Fill or verify Cost of MWh using the same logic as Redemption Status.",
+            )
+
+        rate_usd_missing = c_rate_usd and _safe_str(row.get(c_rate_usd, "")) == ""
+        rate_bdt_missing = c_rate_bdt and _safe_str(row.get(c_rate_bdt, "")) == ""
+        if rate_usd_missing or rate_bdt_missing:
+            _add_issue(
+                issues,
+                issue_type="RATE_MISSING",
+                tab="Exchange",
+                row=row_no,
+                priority="Low",
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="One or more sales rate fields are blank.",
+                likely_cause="Manual import missed Sales Rate (USD) and/or BDT rate.",
+                suggested_fix="Fill Sales Rate (USD) and Sales Rate / Exchange Rate (BDT) manually before using Total (BDT).",
+            )
+
+        total_cost_missing = c_total_cost and _safe_str(row.get(c_total_cost, "")) == ""
+        total_amt_missing = c_total_amt and _safe_str(row.get(c_total_amt, "")) == ""
+        if total_cost_missing or total_amt_missing:
+            _add_issue(
+                issues,
+                issue_type="FORMULA_OUTPUT_MISSING",
+                tab="Exchange",
+                row=row_no,
+                priority="Low",
+                device_id=did_raw,
+                device_name=dname,
+                vintage=vintage,
+                summary="One or more formula outputs are blank.",
+                likely_cause="Missing driver inputs or broken formula cells.",
+                suggested_fix="Check Number of Certificate, Cost of MWh, Sales Rate (USD), and BDT rate first.",
+            )
+
+    return {
+        "mode": "diagnostic",
+        "answer": _summarize_issue_set("Exchange", issues),
+        "issues": issues,
+        "helper_tab": {"name": "AI Exceptions - Exchange", "rows": issues},
+        "meta": {"tab_used": "Exchange"},
+    }
+
+
+# ============================================================
+# Diagnostics: Transfer Status
+# ============================================================
+
+def _diag_transfer(tables: Dict[str, pd.DataFrame], registry: RegistryLookup) -> Dict[str, Any]:
+    out_df = tables.get("Transfer Status (OUT)")
+    dws = tables.get("Device Wise Sales Status")
+    issues: List[Dict[str, Any]] = []
+
+    if out_df is None or out_df.empty:
+        return {
+            "mode": "diagnostic",
+            "answer": "Transfer Status (OUT) is empty or missing.",
+            "issues": [],
+            "helper_tab": {"name": "AI Exceptions - Transfer Status", "rows": []},
+            "meta": {"tab_used": "Transfer Status"},
+        }
+
+    c_pid = _first_existing(out_df, ["Plant ID", "Device ID"])
+    c_vintage = _first_existing(out_df, ["Vintage"])
+    c_mwh = _first_existing(out_df, ["MWh"])
+
+    dws_ids: set[str] = set()
+    if dws is not None and not dws.empty:
+        dws_plant = _first_existing(dws, ["Plant ID"])
+        if dws_plant:
+            dws_ids = {_normalize_id(v) for v in dws[dws_plant]}
+
+    for _, row in out_df.iterrows():
+        row_no = int(row["__row"]) if "__row" in row else None
+        pid_raw = _safe_str(row.get(c_pid, "")) if c_pid else ""
+        pid = _normalize_id(pid_raw)
+        vintage = _safe_str(row.get(c_vintage, "")) if c_vintage else ""
+        mwh_raw = row.get(c_mwh, "") if c_mwh else ""
+        mwh_val = _to_num_or_none(mwh_raw)
+
+        if not pid:
+            _add_issue(
+                issues,
+                issue_type="WRONG_PLANT_ID",
+                tab="Transfer Status",
+                row=row_no,
+                priority="High",
+                device_id=pid_raw,
+                vintage=vintage,
+                summary="Plant ID is blank on Transfer OUT row.",
+                likely_cause="Transfer OUT cannot map downstream without Plant ID.",
+                suggested_fix="Correct Plant ID in Transfer Status using Registration Data-GRIT first, then Registration Data-Delnotic.",
+            )
+        elif pid not in registry.ids:
+            _add_issue(
+                issues,
+                issue_type="WRONG_PLANT_ID",
+                tab="Transfer Status",
+                row=row_no,
+                priority="High",
+                device_id=pid_raw,
+                vintage=vintage,
+                summary="Plant ID does not exist in registration source.",
+                likely_cause="Wrong transfer plant mapping.",
+                suggested_fix="Correct Plant ID in Transfer Status and validate against registration data.",
+            )
+
+        if pid and dws_ids and pid not in dws_ids:
+            _add_issue(
+                issues,
+                issue_type="OUT_NOT_FLOWING_TO_DEVICE_WISE_SALES",
+                tab="Transfer Status",
+                row=row_no,
+                priority="High",
+                device_id=pid_raw,
+                vintage=vintage,
+                summary="Transfer OUT Plant ID does not exist in Device Wise Sales Status.",
+                likely_cause="Missing plant row in Device Wise Sales Status or wrong Plant ID in Transfer Status.",
+                suggested_fix="Validate Plant ID against registration data. If valid, add the missing plant row to Device Wise Sales Status; otherwise correct Plant ID in Transfer Status.",
+            )
+
+        if c_mwh and (mwh_val is None or abs(mwh_val) < 1e-12):
+            _add_issue(
+                issues,
+                issue_type="WRONG_MWH",
+                tab="Transfer Status",
+                row=row_no,
+                priority="Medium",
+                device_id=pid_raw,
+                vintage=vintage,
+                summary="Transfer OUT MWh is blank or zero.",
+                likely_cause="MWh value was not entered correctly.",
+                suggested_fix="Correct MWh in Transfer Status before relying on downstream sold calculations.",
+            )
+
+    return {
+        "mode": "diagnostic",
+        "answer": _summarize_issue_set("Transfer Status", issues),
+        "issues": issues,
+        "helper_tab": {"name": "AI Exceptions - Transfer Status", "rows": issues},
+        "meta": {"tab_used": "Transfer Status"},
+    }
+
+
+# ============================================================
+# Diagnostics: Device Wise Sales Status
+# ============================================================
+
+def _sum_by_id_vintage(df: pd.DataFrame, id_candidates: List[str], vintage_candidates: List[str], qty_candidates: List[str]) -> Dict[Tuple[str, str], float]:
+    if df is None or df.empty:
+        return {}
+
+    c_id = _first_existing(df, id_candidates)
+    c_v = _first_existing(df, vintage_candidates)
+    c_q = _first_existing(df, qty_candidates)
+    if not c_id or not c_v or not c_q:
+        return {}
+
+    tmp = df.copy()
+    tmp["__id"] = tmp[c_id].map(_normalize_id)
+    tmp["__v"] = tmp[c_v].map(_normalize_vintage)
+    tmp["__q"] = tmp[c_q].map(_to_num)
+
+    tmp = tmp[(tmp["__id"] != "") & (tmp["__v"] != "")]
+    grp = tmp.groupby(["__id", "__v"], dropna=False)["__q"].sum().reset_index()
+    return {(r["__id"], r["__v"]): float(r["__q"]) for _, r in grp.iterrows()}
+
+
+def _extract_vintage_from_header(col: str, keyword: str) -> Optional[str]:
+    if keyword.lower() not in col.lower():
+        return None
+    m = re.search(r"(V\d{2}\s*Q[1-4])", col, flags=re.I)
+    if not m:
+        return None
+    return m.group(1).replace(" ", "").upper()
+
+
+def _diag_device_wise_sales(tables: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+    dws = tables.get("Device Wise Sales Status")
+    issuance = tables.get("Issuance Status")
+    redemption = tables.get("Redemption Status")
+    exchange = tables.get("Exchange")
+    transfer_out = tables.get("Transfer Status (OUT)")
+    issues: List[Dict[str, Any]] = []
+
+    if dws is None or dws.empty:
+        return {
+            "mode": "diagnostic",
+            "answer": "Device Wise Sales Status is empty or missing.",
+            "issues": [],
+            "helper_tab": {"name": "AI Exceptions - Device Wise Sales Status", "rows": []},
+            "meta": {"tab_used": "Device Wise Sales Status"},
+        }
+
+    c_pid = _first_existing(dws, ["Plant ID"])
+    if not c_pid:
+        return {
+            "mode": "diagnostic",
+            "answer": "Device Wise Sales Status does not contain Plant ID.",
+            "issues": [],
+            "helper_tab": {"name": "AI Exceptions - Device Wise Sales Status", "rows": []},
+            "meta": {"tab_used": "Device Wise Sales Status"},
+        }
+
+    # upstream lookups
+    issued_lookup = _sum_by_id_vintage(
+        issuance,
+        ["Device ID", "Plant ID"],
+        ["Vintage"],
+        ["MWh"],
+    )
+    red_lookup = _sum_by_id_vintage(
+        redemption,
+        ["Device ID", "Plant ID"],
+        ["Vintage"],
+        ["Number of Certificate", "Number of Certificates"],
+    )
+    exc_lookup = _sum_by_id_vintage(
+        exchange,
+        ["Device ID", "Plant ID"],
+        ["Vintage"],
+        ["Number of Certificate", "Number of Certificates"],
+    )
+    out_lookup = _sum_by_id_vintage(
+        transfer_out,
+        ["Plant ID", "Device ID"],
+        ["Vintage"],
+        ["MWh"],
+    )
+
+    issued_cols = [c for c in dws.columns if "issued" in _norm(c)]
+    sold_cols = [c for c in dws.columns if "sold" in _norm(c)]
+
+    for _, row in dws.iterrows():
+        row_no = int(row["__row"]) if "__row" in row else None
+        pid_raw = _safe_str(row.get(c_pid, ""))
+        pid = _normalize_id(pid_raw)
+        if not pid:
+            continue
+
+        # issued checks
+        for col in issued_cols:
+            vint = _extract_vintage_from_header(col, "issued")
+            if not vint:
+                continue
+            actual = _to_num(row.get(col, ""))
+            expected = issued_lookup.get((pid, vint), 0.0)
+            if expected > 0 and abs(actual - expected) > 1e-9:
+                _add_issue(
+                    issues,
+                    issue_type="ISSUED_NOT_UPDATED",
+                    tab="Device Wise Sales Status",
+                    row=row_no,
+                    priority="High",
+                    device_id=pid_raw,
+                    vintage=vint,
+                    summary=f"Issued column '{col}' = {actual:g}, but Issuance Status implies {expected:g}.",
+                    likely_cause="Plant ID mismatch between Issuance Status and Device Wise Sales Status, or missing plant row here.",
+                    suggested_fix="Check whether Plant ID matches Device ID from Issuance Status. If the plant is valid but missing here, add the missing plant row.",
+                )
+
+        # sold checks
+        for col in sold_cols:
+            vint = _extract_vintage_from_header(col, "sold")
+            if not vint:
+                continue
+            actual = _to_num(row.get(col, ""))
+            expected_red = red_lookup.get((pid, vint), 0.0)
+            expected_out = out_lookup.get((pid, vint), 0.0)
+            expected_exc = exc_lookup.get((pid, vint), 0.0)
+            expected = expected_red + expected_out + expected_exc
+
+            if expected > 0 and abs(actual - expected) > 1e-9:
+                _add_issue(
+                    issues,
+                    issue_type="SOLD_NOT_UPDATED",
+                    tab="Device Wise Sales Status",
+                    row=row_no,
+                    priority="High",
+                    device_id=pid_raw,
+                    vintage=vint,
+                    summary=(
+                        f"Sold column '{col}' = {actual:g}, but upstream sources imply {expected:g} "
+                        f"(Redemption={expected_red:g}, Transfer OUT={expected_out:g}, Exchange={expected_exc:g})."
+                    ),
+                    likely_cause="Missing flow from one or more sold sources, Plant ID mismatch, or missing plant row in Device Wise Sales Status.",
+                    suggested_fix="Trace all three sold sources: Redemption Status, Transfer OUT, and Exchange. Then check Plant ID matching and whether the plant row exists in Device Wise Sales Status.",
+                )
+
+        # sold > issued
+        for scol in sold_cols:
+            vint = _extract_vintage_from_header(scol, "sold")
+            if not vint:
+                continue
+
+            # find matching issued column with same vintage
+            matching_issued = None
+            for icol in issued_cols:
+                if _extract_vintage_from_header(icol, "issued") == vint:
+                    matching_issued = icol
+                    break
+            if not matching_issued:
+                continue
+
+            sold_val = _to_num(row.get(scol, ""))
+            issued_val = _to_num(row.get(matching_issued, ""))
+            if sold_val > issued_val + 1e-9:
+                _add_issue(
+                    issues,
+                    issue_type="SOLD_GT_ISSUED",
+                    tab="Device Wise Sales Status",
+                    row=row_no,
+                    priority="High",
+                    device_id=pid_raw,
+                    vintage=vint,
+                    summary=f"Sold {sold_val:g} exceeds Issued {issued_val:g}.",
+                    likely_cause="Issued side may be incomplete, though downstream double-counting or manual source issues are also possible.",
+                    suggested_fix="First validate whether Issuance Status is complete for this plant/vintage before concluding over-selling or duplicate sold-side flow.",
+                )
+
+    return {
+        "mode": "diagnostic",
+        "answer": _summarize_issue_set("Device Wise Sales Status", issues),
+        "issues": issues,
+        "helper_tab": {"name": "AI Exceptions - Device Wise Sales Status", "rows": issues},
+        "meta": {"tab_used": "Device Wise Sales Status"},
+    }
+
+
+# ============================================================
+# Diagnostics: Issuance Status (minimal, since you stopped early)
+# ============================================================
+
+def _diag_issuance_status(tables: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+    df = tables.get("Issuance Status")
+    issues: List[Dict[str, Any]] = []
+
+    if df is None or df.empty:
+        return {
+            "mode": "diagnostic",
+            "answer": "Issuance Status is empty or missing.",
+            "issues": [],
+            "helper_tab": {"name": "AI Exceptions - Issuance Status", "rows": []},
+            "meta": {"tab_used": "Issuance Status"},
+        }
+
+    c_id = _first_existing(df, ["Device ID", "Plant ID"])
+    c_v = _first_existing(df, ["Vintage"])
+    c_mwh = _first_existing(df, ["MWh"])
+
+    for _, row in df.iterrows():
+        row_no = int(row["__row"]) if "__row" in row else None
+        did = _safe_str(row.get(c_id, "")) if c_id else ""
+        vint = _safe_str(row.get(c_v, "")) if c_v else ""
+        mwh = _to_num_or_none(row.get(c_mwh, "")) if c_mwh else None
+
+        if c_id and not _normalize_id(did):
+            _add_issue(
+                issues,
+                issue_type="MISSING_DEVICE_ID",
+                tab="Issuance Status",
+                row=row_no,
+                priority="High",
+                device_id=did,
+                vintage=vint,
+                summary="Device ID is blank.",
+                likely_cause="Plant-vintage issuance record cannot map downstream.",
+                suggested_fix="Fill or correct Device ID before expecting Issued columns to update in Device Wise Sales Status.",
+            )
+        if c_v and not _normalize_vintage(vint):
+            _add_issue(
+                issues,
+                issue_type="WRONG_VINTAGE",
+                tab="Issuance Status",
+                row=row_no,
+                priority="Medium",
+                device_id=did,
+                vintage=vint,
+                summary="Vintage is blank or malformed.",
+                likely_cause="Vintage derivation or source dates are inconsistent.",
+                suggested_fix="Check production start/end dates and re-derive the correct vintage.",
+            )
+        if c_mwh and (mwh is None or abs(mwh) < 1e-12):
+            _add_issue(
+                issues,
+                issue_type="WRONG_MWH",
+                tab="Issuance Status",
+                row=row_no,
+                priority="Medium",
+                device_id=did,
+                vintage=vint,
+                summary="MWh is blank or zero.",
+                likely_cause="Source issuance row not processed correctly.",
+                suggested_fix="Check the source issuance row and refresh Issuance Status build.",
+            )
+
+    return {
+        "mode": "diagnostic",
+        "answer": _summarize_issue_set("Issuance Status", issues),
+        "issues": issues,
+        "helper_tab": {"name": "AI Exceptions - Issuance Status", "rows": issues},
+        "meta": {"tab_used": "Issuance Status"},
+    }
+
+
+# ============================================================
+# Router + formatting
+# ============================================================
+
+def _summarize_issue_set(tab_name: str, issues: List[Dict[str, Any]]) -> str:
+    if not issues:
+        return f"No major issues detected in '{tab_name}'."
+
+    counts: Dict[str, int] = {}
+    for it in issues:
+        counts[it["Issue Type"]] = counts.get(it["Issue Type"], 0) + 1
+
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    lines = [f"Detected {len(issues)} issue(s) in '{tab_name}'."]
+    for k, v in ordered[:8]:
+        lines.append(f"- {k}: {v}")
+
+    top = issues[0]
+    lines.append(
+        f"Top priority example: {top['Issue Type']} on row {top['Row No'] or '(sheet-level)'} — {top['Issue Summary']}"
+    )
+    return "\n".join(lines)
+
+
+def _run_diagnostic(question: str, tables: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+    # enrich transfer status into IN/OUT logical tabs
+    if "Transfer Status" in tables:
+        parsed = _parse_transfer_status(tables["Transfer Status"])
+        for k, v in parsed.items():
+            tables[k] = v
+
+    registry = _build_registry_lookup(tables)
+    tab = _detect_tab(question)
+
+    if tab == "Redemption Status":
+        return _diag_redemption(tables, registry)
+    if tab == "Exchange":
+        return _diag_exchange(tables, registry)
+    if tab == "Transfer Status":
+        return _diag_transfer(tables, registry)
+    if tab == "Device Wise Sales Status":
+        return _diag_device_wise_sales(tables)
+    if tab == "Issuance Status":
+        return _diag_issuance_status(tables)
+
+    # workbook-level default summary
+    sections = [
+        _diag_redemption(tables, registry),
+        _diag_exchange(tables, registry),
+        _diag_transfer(tables, registry),
+        _diag_device_wise_sales(tables),
+    ]
+    all_issues: List[Dict[str, Any]] = []
+    for s in sections:
+        all_issues.extend(s.get("issues", []))
+
+    answer = _summarize_issue_set("Workbook", all_issues)
+    return {
+        "mode": "diagnostic",
+        "answer": answer,
+        "issues": all_issues,
+        "helper_tab": {"name": "AI Exceptions - Workbook", "rows": all_issues},
+        "meta": {"tab_used": "Workbook"},
+    }
+
+
+# ============================================================
+# Public API
+# ============================================================
 
 def answer_finance(question: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    q = parse_question(question)
-
     tabs = snapshot.get("tabs", {})
     if not isinstance(tabs, dict) or not tabs:
         return {"answer": "No tabs provided in snapshot."}
 
-    # Build dfs from all tabs
-    dfs: Dict[str, pd.DataFrame] = {}
-    for name, tab in tabs.items():
-        try:
-            df = _to_df(tab)
-            # Special-case Transfer Status
-            if _norm(name) == "transfer status":
-                parsed = _parse_transfer_status(df)
-                for k, v in parsed.items():
-                    dfs[k] = v
-            else:
-                dfs[name] = df
-        except Exception:
-            continue
+    tables = _build_tables(snapshot)
+    intent = _detect_intent(question)
 
-    # Quick guard: if question is not compute-like
-    ql = question.lower()
-    compute_words = ["total", "sum", "avg", "average", "count", "top", "by", "group", "compare", "trend"]
-    if not any(w in ql for w in compute_words):
-        return {
-            "answer": "Ask a compute-style finance question.\nExamples:\n"
-                      "- total number of certificate by client name\n"
-                      "- top 5 client name by number of certificate\n"
-                      "- sum mwh by vintage between 2024-01-01 and 2024-12-31\n"
-                      "- total (bdt) by client name tab: Exchange"
-        }
-
-    # Score tabs for this query and pick best
-    scored: List[Tuple[int, str]] = []
-    for tname, df in dfs.items():
-        scored.append((_tab_score_for_query(tname, df, q), tname))
-    scored.sort(reverse=True)
-
-    # Try best few tabs until one works
-    last_err = None
-    for score, tname in scored[:6]:
-        df = dfs[tname]
-        try:
-            # Ensure metric exists when needed
-            if q.op != "count" and q.metric:
-                mc = _pick_metric_col(df, q.metric)
-                if not mc:
-                    # skip tab that doesn't have metric
-                    continue
-            return _compute(df, q, tname)
-        except Exception as e:
-            last_err = e
-            continue
-
-    # If nothing matched, provide guidance
-    msg = "Could not match your question to a suitable tab/metric.\n"
-    if q.metric:
-        msg += f"- Metric requested: {q.metric}\n"
-    if q.dims:
-        msg += f"- Grouping: {q.dims}\n"
-    if q.tab_hint:
-        msg += f"- Tab hint: {q.tab_hint}\n"
-    if last_err:
-        msg += f"- Last error: {last_err}\n"
-    msg += "\nTip: Add 'tab: <Tab Name>' to force a tab, e.g. 'tab: Exchange total (bdt) by client name'."
-    return {"answer": msg}
+    if intent == "compute":
+        return _run_compute(question, tables)
+    return _run_diagnostic(question, tables)
