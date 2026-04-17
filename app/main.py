@@ -907,24 +907,56 @@ async def process_cogs_xlsx(
 
 
 from .finance_agent import answer_finance
-from .llm import explain_finance_result
+from .llm import upload_spreadsheet, ask_about_file
 
-@app.post("/m1/finance-agent")
-async def m1_finance_agent(payload: dict):
+from fastapi import Body
+
+# very simple memory store for beginner version
+# later you can move this to DB / Redis if needed
+CHAT_STATE = {}
+
+@app.post("/m1/finance-chat/upload")
+async def finance_chat_upload(file: UploadFile = File(...)):
+    try:
+        file_bytes = await file.read()
+        file_id = upload_spreadsheet(file_bytes, file.filename)
+
+        CHAT_STATE["latest_file_id"] = file_id
+        CHAT_STATE["latest_filename"] = file.filename
+        CHAT_STATE["latest_response_id"] = None
+
+        return {
+            "ok": True,
+            "file_id": file_id,
+            "filename": file.filename,
+            "message": "Spreadsheet uploaded successfully."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
+
+@app.post("/m1/finance-chat/ask")
+async def finance_chat_ask(payload: dict = Body(...)):
     question = str(payload.get("question", "")).strip()
-    snapshot = payload.get("snapshot", {})
+
+    file_id = payload.get("file_id") or CHAT_STATE.get("latest_file_id")
+    previous_response_id = payload.get("previous_response_id") or CHAT_STATE.get("latest_response_id")
 
     if not question:
         raise HTTPException(status_code=400, detail="Missing question")
-    if not snapshot or "tabs" not in snapshot:
-        raise HTTPException(status_code=400, detail="Missing snapshot tabs")
-
-    result = answer_finance(question, snapshot)
+    if not file_id:
+        raise HTTPException(status_code=400, detail="No uploaded spreadsheet found")
 
     try:
-        llm = explain_finance_result(question, result)
-        result["answer"] = llm["llm_answer"]
-    except Exception as e:
-        result["llm_error"] = str(e)
+        out = ask_about_file(
+            question=question,
+            file_id=file_id,
+            previous_response_id=previous_response_id,
+        )
 
-    return result
+        CHAT_STATE["latest_response_id"] = out["response_id"]
+
+        return out
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ask failed: {e}")
