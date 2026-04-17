@@ -935,6 +935,9 @@ async def finance_chat_upload(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
 
+from fastapi import Body
+from .llm import ask_about_snapshot
+
 @app.post("/m1/finance-chat/ask")
 async def finance_chat_ask(payload: dict = Body(...)):
     question = str(payload.get("question", "")).strip()
