@@ -169,98 +169,126 @@ def _build_tables(snapshot: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
 # ============================================================
 # Transfer Status parser
 # ============================================================
+def _maybe_to_datetime(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+
+def _maybe_to_numeric(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce")
+
 
 def _parse_transfer_status(df_raw: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """
     Robust parser for snapshot-exported Transfer Status sheet.
 
-    Works with the snapshot shape produced by Apps Script, where:
-    - df_raw columns are already the sheet headers
-    - there may be many blank / unnamed / duplicate columns
-    - IN and OUT tables are side-by-side
+    Key design:
+    - works by column POSITION, not column label
+    - survives duplicate column names
+    - trims empty columns safely
+    - splits IN / OUT using the visible 'OUT' marker column
     """
     if df_raw is None or df_raw.empty:
         return {}
 
     df = df_raw.copy()
 
-    # Keep __row separately
-    row_col = "__row" if "__row" in df.columns else None
+    # Separate __row if present
+    has_row = "__row" in df.columns
+    row_values = df["__row"].tolist() if has_row else None
 
-    # Build ordered visible columns, dropping fully blank columns
-    keep_cols = []
-    for c in df.columns:
-        if c == "__row":
+    # Build visible non-empty columns by POSITION, not by label
+    visible_positions = []
+    visible_headers = []
+
+    for idx, col_name in enumerate(df.columns):
+        if col_name == "__row":
             continue
-        series = df[c].map(_safe_str)
-        header_nonempty = _safe_str(c) != ""
-        value_nonempty = series.ne("").any()
-        if header_nonempty or value_nonempty:
-            keep_cols.append(c)
 
-    if not keep_cols:
+        col_obj = df.iloc[:, idx]
+
+        header_nonempty = _safe_str(col_name) != ""
+        value_nonempty = col_obj.map(_safe_str).ne("").any()
+
+        if bool(header_nonempty) or bool(value_nonempty):
+            visible_positions.append(idx)
+            visible_headers.append(str(col_name).strip())
+
+    if not visible_positions:
         return {"Transfer Status": df_raw}
 
-    work = df[[row_col] + keep_cols].copy() if row_col else df[keep_cols].copy()
+    work = df.iloc[:, visible_positions].copy()
+    work.columns = visible_headers[:]
 
-    cols = [c for c in work.columns if c != "__row"]
-
-    # Detect OUT marker column by header text
-    out_idx = None
-    for i, c in enumerate(cols):
+    # Detect OUT marker by POSITION
+    out_pos = None
+    for i, c in enumerate(work.columns):
         if _norm(c) == "out":
-            out_idx = i
+            out_pos = i
             break
 
-    # If no OUT marker exists, return raw fallback
-    if out_idx is None:
-        return {"Transfer Status": work}
+    if out_pos is None:
+        if has_row:
+            work.insert(0, "__row", row_values)
+        return {"Transfer Status": _drop_all_blank_rows(work)}
 
-    left_cols = cols[:out_idx]
-    right_cols = cols[out_idx + 1:]   # exclude the marker column itself
+    left_df = work.iloc[:, :out_pos].copy()
+    right_df = work.iloc[:, out_pos + 1:].copy()   # exclude OUT marker itself
 
-    def _clean_block(block_cols: List[str], block_name: str) -> pd.DataFrame:
-        if not block_cols:
+    def _clean_block(block: pd.DataFrame, block_name: str) -> pd.DataFrame:
+        if block is None or block.empty:
             return pd.DataFrame()
 
-        block = work[block_cols].copy()
+        # Drop fully blank columns by position
+        keep_idx = []
+        for j in range(block.shape[1]):
+            s = block.iloc[:, j].map(_safe_str)
+            if s.ne("").any() or _safe_str(block.columns[j]) != "":
+                keep_idx.append(j)
 
-        # Drop columns that are fully blank
-        block = block.loc[:, block.apply(lambda s: s.map(_safe_str).ne("").any(), axis=0)]
+        if not keep_idx:
+            return pd.DataFrame()
 
-        # Normalize obvious header names
-        rename_map = {}
+        block = block.iloc[:, keep_idx].copy()
+
+        # Rename obvious headers safely, one-by-one
+        new_cols = []
+        used = {}
+
         for c in block.columns:
             cn = _norm(c)
-
-            if cn in {"plant id", "device id"}:
-                rename_map[c] = "Plant ID"
+            if cn in {"sl"}:
+                base = "Sl"
+            elif cn in {"plant id", "device id"}:
+                base = "Plant ID"
             elif cn in {"period starts", "start date", "production starts"}:
-                rename_map[c] = "Period Starts"
+                base = "Period Starts"
             elif cn in {"period ends", "end date", "production ends"}:
-                rename_map[c] = "Period Ends"
+                base = "Period Ends"
             elif cn in {"vintage"}:
-                rename_map[c] = "Vintage"
+                base = "Vintage"
             elif cn in {"mwh"}:
-                rename_map[c] = "MWh"
+                base = "MWh"
             elif cn in {"total cost"}:
-                rename_map[c] = "Total Cost"
+                base = "Total Cost"
             elif cn in {"cost per mwh", "cost/mwh"}:
-                rename_map[c] = "Cost per MWh"
+                base = "Cost per MWh"
             elif cn in {"plant owner cost (usd)", "owner cost"}:
-                rename_map[c] = "Plant Owner Cost (USD)"
-            elif cn in {"sl"}:
-                rename_map[c] = "Sl"
+                base = "Plant Owner Cost (USD)"
+            else:
+                base = str(c).strip() if _safe_str(c) else "Unnamed"
 
-        block.rename(columns=rename_map, inplace=True)
+            used[base] = used.get(base, 0) + 1
+            if used[base] == 1:
+                new_cols.append(base)
+            else:
+                new_cols.append(f"{base}.{used[base]-1}")
 
-        # Reattach __row
-        if row_col:
-            block.insert(0, "__row", work["__row"].tolist())
+        block.columns = new_cols
+
+        if has_row:
+            block.insert(0, "__row", row_values)
 
         block = _drop_all_blank_rows(block)
 
-        # Type conversions
         for dc in ["Period Starts", "Period Ends"]:
             if dc in block.columns:
                 block[dc] = _maybe_to_datetime(block[dc])
@@ -272,8 +300,8 @@ def _parse_transfer_status(df_raw: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         block["__tab"] = block_name
         return block
 
-    transfer_in = _clean_block(left_cols, "Transfer Status (IN)")
-    transfer_out = _clean_block(right_cols, "Transfer Status (OUT)")
+    transfer_in = _clean_block(left_df, "Transfer Status (IN)")
+    transfer_out = _clean_block(right_df, "Transfer Status (OUT)")
 
     out = {}
     if not transfer_in.empty:
@@ -282,7 +310,10 @@ def _parse_transfer_status(df_raw: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         out["Transfer Status (OUT)"] = transfer_out
 
     if not out:
-        out["Transfer Status"] = work
+        fallback = work.copy()
+        if has_row:
+            fallback.insert(0, "__row", row_values)
+        out["Transfer Status"] = _drop_all_blank_rows(fallback)
 
     return out
 
