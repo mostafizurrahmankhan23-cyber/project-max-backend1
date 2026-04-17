@@ -908,12 +908,31 @@ async def process_cogs_xlsx(
 
 @app.post("/m1/finance-agent")
 async def m1_finance_agent(payload: dict):
-    question = str(payload.get("question", "")).strip()
-    snapshot = payload.get("snapshot", {})
-    if not question:
-        raise HTTPException(status_code=400, detail="Missing question")
-    if not snapshot or "tabs" not in snapshot:
-        raise HTTPException(status_code=400, detail="Missing snapshot tabs")
-    return answer_finance(question, snapshot)
+    try:
+        question = str(payload.get("question", "")).strip()
+        snapshot = payload.get("snapshot", {})
 
+        print("=== FINANCE AGENT DEBUG START ===")
+        print("QUESTION:", question)
+        print("HAS SNAPSHOT:", bool(snapshot))
+        print("TAB NAMES:", list((snapshot.get("tabs", {}) or {}).keys())[:50])
+
+        if not question:
+            raise HTTPException(status_code=400, detail="Missing question")
+        if not snapshot or "tabs" not in snapshot:
+            raise HTTPException(status_code=400, detail="Missing snapshot tabs")
+
+        out = answer_finance(question, snapshot)
+        print("FINANCE AGENT OUTPUT KEYS:", list(out.keys()))
+        print("=== FINANCE AGENT DEBUG END ===")
+        return out
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print("=== FINANCE AGENT ERROR ===")
+        print(tb)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{tb}")
 
