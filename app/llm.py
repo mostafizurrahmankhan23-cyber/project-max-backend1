@@ -4,30 +4,43 @@ from openai import OpenAI
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 
-def explain_finance_result(question: str, result: dict) -> dict:
-    prompt = f"""
-You are a finance operations copilot for a spreadsheet workflow.
+def upload_spreadsheet(file_bytes: bytes, filename: str) -> str:
+    uploaded = client.files.create(
+        file=(filename, file_bytes),
+        purpose="user_data",
+    )
+    return uploaded.id
 
-User question:
-{question}
-
-Structured diagnostic result:
-{result}
-
-Write a concise response with:
-1. a direct answer,
-2. the top issue categories,
-3. the most likely fixes,
-4. a short priority order.
-
-Do not invent spreadsheet facts beyond the structured result.
-"""
-
-    response = client.responses.create(
-        model=MODEL,
-        input=prompt,
+def ask_about_file(question: str, file_id: str, previous_response_id: str | None = None) -> dict:
+    instructions = (
+        "You are a finance spreadsheet assistant. "
+        "Answer questions based on the uploaded spreadsheet and normal reasoning. "
+        "If something in the spreadsheet is ambiguous, ask a clarification question. "
+        "If the user explains the meaning, use that explanation in later turns of the same conversation. "
+        "Mention relevant tab names and columns when helpful. "
+        "Do not give vague answers when the spreadsheet already contains enough information."
     )
 
+    kwargs = {
+        "model": MODEL,
+        "instructions": instructions,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_file", "file_id": file_id},
+                    {"type": "input_text", "text": question},
+                ],
+            }
+        ],
+    }
+
+    if previous_response_id:
+        kwargs["previous_response_id"] = previous_response_id
+
+    response = client.responses.create(**kwargs)
+
     return {
-        "llm_answer": response.output_text
+        "answer": response.output_text,
+        "response_id": response.id,
     }
