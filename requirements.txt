@@ -6,3 +6,4 @@ openpyxl
 numpy
 python-multipart
 unidecode
+openai>=1.0.0
