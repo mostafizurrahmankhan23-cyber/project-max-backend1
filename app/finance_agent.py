@@ -171,65 +171,120 @@ def _build_tables(snapshot: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
 # ============================================================
 
 def _parse_transfer_status(df_raw: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    if df_raw.empty:
+    """
+    Robust parser for snapshot-exported Transfer Status sheet.
+
+    Works with the snapshot shape produced by Apps Script, where:
+    - df_raw columns are already the sheet headers
+    - there may be many blank / unnamed / duplicate columns
+    - IN and OUT tables are side-by-side
+    """
+    if df_raw is None or df_raw.empty:
         return {}
 
     df = df_raw.copy()
-    cols = list(df.columns)
 
-    # identify "OUT" split column
+    # Keep __row separately
+    row_col = "__row" if "__row" in df.columns else None
+
+    # Build ordered visible columns, dropping fully blank columns
+    keep_cols = []
+    for c in df.columns:
+        if c == "__row":
+            continue
+        series = df[c].map(_safe_str)
+        header_nonempty = _safe_str(c) != ""
+        value_nonempty = series.ne("").any()
+        if header_nonempty or value_nonempty:
+            keep_cols.append(c)
+
+    if not keep_cols:
+        return {"Transfer Status": df_raw}
+
+    work = df[[row_col] + keep_cols].copy() if row_col else df[keep_cols].copy()
+
+    cols = [c for c in work.columns if c != "__row"]
+
+    # Detect OUT marker column by header text
     out_idx = None
     for i, c in enumerate(cols):
         if _norm(c) == "out":
             out_idx = i
             break
 
-    if out_idx is None or len(df) < 1:
-        return {"Transfer Status": df_raw}
-
-    header_row = df.iloc[0].to_dict()
-
-    def build_block(block_cols: List[str], tab_name: str) -> pd.DataFrame:
-        block = df[block_cols].copy()
-
-        new_cols = []
-        for c in block_cols:
-            hv = _safe_str(header_row.get(c, ""))
-            new_cols.append(hv if hv else c)
-
-        block.columns = [str(c).strip() for c in new_cols]
-        block = block.iloc[1:].copy()
-        block.insert(0, "__row", df["__row"].iloc[1:].astype(int).tolist())
-        block = _drop_all_blank_rows(block)
-
-        # normalize columns
-        rename_map = {
-            "Plant ID": "Plant ID",
-            "Period Starts": "Period Starts",
-            "Period Ends": "Period Ends",
-            "Vintage": "Vintage",
-            "MWh": "MWh",
-            "Total Cost": "Total Cost",
-            "Cost per MWh": "Cost per MWh",
-            "Cost/MWh": "Cost per MWh",
-            "Plant Owner Cost (USD)": "Plant Owner Cost (USD)",
-        }
-
-        cols2 = list(block.columns)
-        for old in cols2:
-            for k, v in rename_map.items():
-                if _norm(old) == _norm(k):
-                    block.rename(columns={old: v}, inplace=True)
-
-        return block
+    # If no OUT marker exists, return raw fallback
+    if out_idx is None:
+        return {"Transfer Status": work}
 
     left_cols = cols[:out_idx]
-    right_cols = cols[out_idx:]
+    right_cols = cols[out_idx + 1:]   # exclude the marker column itself
 
-    return {
-        "Transfer Status (IN)": build_block(left_cols, "Transfer Status (IN)"),
-        "Transfer Status (OUT)": build_block(right_cols, "Transfer Status (OUT)"),
-    }
+    def _clean_block(block_cols: List[str], block_name: str) -> pd.DataFrame:
+        if not block_cols:
+            return pd.DataFrame()
+
+        block = work[block_cols].copy()
+
+        # Drop columns that are fully blank
+        block = block.loc[:, block.apply(lambda s: s.map(_safe_str).ne("").any(), axis=0)]
+
+        # Normalize obvious header names
+        rename_map = {}
+        for c in block.columns:
+            cn = _norm(c)
+
+            if cn in {"plant id", "device id"}:
+                rename_map[c] = "Plant ID"
+            elif cn in {"period starts", "start date", "production starts"}:
+                rename_map[c] = "Period Starts"
+            elif cn in {"period ends", "end date", "production ends"}:
+                rename_map[c] = "Period Ends"
+            elif cn in {"vintage"}:
+                rename_map[c] = "Vintage"
+            elif cn in {"mwh"}:
+                rename_map[c] = "MWh"
+            elif cn in {"total cost"}:
+                rename_map[c] = "Total Cost"
+            elif cn in {"cost per mwh", "cost/mwh"}:
+                rename_map[c] = "Cost per MWh"
+            elif cn in {"plant owner cost (usd)", "owner cost"}:
+                rename_map[c] = "Plant Owner Cost (USD)"
+            elif cn in {"sl"}:
+                rename_map[c] = "Sl"
+
+        block.rename(columns=rename_map, inplace=True)
+
+        # Reattach __row
+        if row_col:
+            block.insert(0, "__row", work["__row"].tolist())
+
+        block = _drop_all_blank_rows(block)
+
+        # Type conversions
+        for dc in ["Period Starts", "Period Ends"]:
+            if dc in block.columns:
+                block[dc] = _maybe_to_datetime(block[dc])
+
+        for nc in ["MWh", "Total Cost", "Cost per MWh", "Plant Owner Cost (USD)"]:
+            if nc in block.columns:
+                block[nc] = _maybe_to_numeric(block[nc])
+
+        block["__tab"] = block_name
+        return block
+
+    transfer_in = _clean_block(left_cols, "Transfer Status (IN)")
+    transfer_out = _clean_block(right_cols, "Transfer Status (OUT)")
+
+    out = {}
+    if not transfer_in.empty:
+        out["Transfer Status (IN)"] = transfer_in
+    if not transfer_out.empty:
+        out["Transfer Status (OUT)"] = transfer_out
+
+    if not out:
+        out["Transfer Status"] = work
+
+    return out
 
 
 # ============================================================
