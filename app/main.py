@@ -936,3 +936,27 @@ async def m1_finance_agent(payload: dict):
         print(tb)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}\n{tb}")
 
+from .finance_agent import answer_finance
+from .llm import explain_finance_result
+
+@app.post("/m1/finance-agent")
+async def m1_finance_agent(payload: dict):
+    question = str(payload.get("question", "")).strip()
+    snapshot = payload.get("snapshot", {})
+
+    if not question:
+        raise HTTPException(status_code=400, detail="Missing question")
+    if not snapshot or "tabs" not in snapshot:
+        raise HTTPException(status_code=400, detail="Missing snapshot tabs")
+
+    result = answer_finance(question, snapshot)
+
+    # Optional LLM explanation layer
+    try:
+        llm = explain_finance_result(question, result)
+        result["answer"] = llm["llm_answer"]
+    except Exception:
+        # keep your rule-based result even if LLM call fails
+        pass
+
+    return result
