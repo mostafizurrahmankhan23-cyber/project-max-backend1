@@ -1,25 +1,22 @@
 import os
+import json
 from openai import OpenAI
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 
-def upload_spreadsheet(file_bytes: bytes, filename: str) -> str:
-    uploaded = client.files.create(
-        file=(filename, file_bytes),
-        purpose="user_data",
-    )
-    return uploaded.id
-
-def ask_about_file(question: str, file_id: str, previous_response_id: str | None = None) -> dict:
+def ask_about_snapshot(question: str, snapshot: dict, previous_response_id: str | None = None) -> dict:
     instructions = (
         "You are a finance spreadsheet assistant. "
-        "Answer questions based on the uploaded spreadsheet and normal reasoning. "
-        "If something in the spreadsheet is ambiguous, ask a clarification question. "
-        "If the user explains the meaning, use that explanation in later turns of the same conversation. "
-        "Mention relevant tab names and columns when helpful. "
-        "Do not give vague answers when the spreadsheet already contains enough information."
+        "The user is asking about a live spreadsheet snapshot from Google Sheets. "
+        "Answer directly from the spreadsheet content and normal reasoning. "
+        "If something is ambiguous, ask a clarification question. "
+        "If the user explains the meaning of a tab/column, use that explanation in later turns of the same conversation. "
+        "Mention tab names and columns when helpful. "
+        "Do not be vague if the spreadsheet already contains enough information."
     )
+
+    snapshot_text = json.dumps(snapshot, ensure_ascii=False)
 
     kwargs = {
         "model": MODEL,
@@ -28,8 +25,10 @@ def ask_about_file(question: str, file_id: str, previous_response_id: str | None
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_file", "file_id": file_id},
-                    {"type": "input_text", "text": question},
+                    {
+                        "type": "input_text",
+                        "text": f"Spreadsheet snapshot:\n{snapshot_text}\n\nQuestion: {question}"
+                    }
                 ],
             }
         ],
