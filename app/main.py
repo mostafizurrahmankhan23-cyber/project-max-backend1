@@ -941,25 +941,20 @@ from .llm import ask_about_snapshot
 @app.post("/m1/finance-chat/ask")
 async def finance_chat_ask(payload: dict = Body(...)):
     question = str(payload.get("question", "")).strip()
-
-    file_id = payload.get("file_id") or CHAT_STATE.get("latest_file_id")
-    previous_response_id = payload.get("previous_response_id") or CHAT_STATE.get("latest_response_id")
+    snapshot = payload.get("snapshot", {})
+    previous_response_id = payload.get("previous_response_id")
 
     if not question:
         raise HTTPException(status_code=400, detail="Missing question")
-    if not file_id:
-        raise HTTPException(status_code=400, detail="No uploaded spreadsheet found")
+    if not snapshot or "tabs" not in snapshot:
+        raise HTTPException(status_code=400, detail="Missing snapshot tabs")
 
     try:
-        out = ask_about_file(
+        out = ask_about_snapshot(
             question=question,
-            file_id=file_id,
+            snapshot=snapshot,
             previous_response_id=previous_response_id,
         )
-
-        CHAT_STATE["latest_response_id"] = out["response_id"]
-
         return out
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ask failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Finance chat failed: {e}")
