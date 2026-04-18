@@ -23,7 +23,7 @@ from m1_pipeline.cost_redemption import attach_redemption_cost
 from m1_pipeline.transfer_vintage import attach_transfer_vintage
 from m1_pipeline.device_wise_sales import fill_device_wise_sales
 from m1_pipeline.cogs import compute_cogs
-from .finance_agent import answer_finance
+
 
 
 app = FastAPI(
